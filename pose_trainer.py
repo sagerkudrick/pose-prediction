@@ -18,7 +18,7 @@ from sklearn.model_selection import train_test_split
 
 # ============== CONFIG ==============
 CSV_PATH = "dataset_csv/rotations_20251122_124605.csv"
-IMG_DIR = "renders/jpg_folder"           # where images referenced by CSV live
+IMG_DIR = "dataset"           # where images referenced by CSV live
 BATCH_SIZE = 32
 NUM_EPOCHS = 150
 LR = 1e-4
