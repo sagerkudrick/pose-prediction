@@ -20,4 +20,4 @@ COPY . .
 RUN mkdir -p /workspace/checkpoints
 
 # Default command: run training
-CMD ["python3", "trainer_rewrite.py"]
+CMD ["python3", "pose_trainer.py"]
