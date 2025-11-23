@@ -1,9 +1,6 @@
-# Use the PyTorch version compatible with CUDA 11.4
 torch==1.12.1+cu114
 torchvision==0.13.1+cu114
 torchaudio==0.12.1
-
-# Other dependencies (add whatever else your project uses)
 numpy
 pandas
 Pillow
