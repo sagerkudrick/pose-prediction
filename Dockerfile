@@ -7,6 +7,10 @@ WORKDIR /workspace
 # Prevent prompts during package installation
 ENV DEBIAN_FRONTEND=noninteractive
 
+RUN apt-get update && apt-get install -y wget && \
+    mkdir -p /root/.cache/torch/hub/checkpoints && \
+    wget https://download.pytorch.org/models/resnet18-f37072fd.pth -O /root/.cache/torch/hub/checkpoints/resnet18-f37072fd.pth
+
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
     python3.8 \
