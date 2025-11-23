@@ -1,7 +1,6 @@
 # Use a torch version built for CUDA 11 (11.x)
-torch==1.12.1+cu114
-torchvision==0.13.1+cu114
--f https://download.pytorch.org/whl/cu114/torch_stable.html
+torch==1.12.1
+torchvision==0.13.1
 
 
 
