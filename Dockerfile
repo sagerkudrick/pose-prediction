@@ -1,5 +1,6 @@
 # Use NVIDIA CUDA 11.4 runtime on Ubuntu 20.04
 FROM nvidia/cuda:11.4.3-runtime-ubuntu20.04
+ENV PYTHONUNBUFFERED=1
 
 # Set working directory
 WORKDIR /workspace

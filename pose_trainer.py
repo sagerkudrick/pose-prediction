@@ -1,12 +1,13 @@
 # trainer_rewrite.py
 """
-Trainer for quaternion regression.
+Trainer for quaternion regression with proper logging.
 Expected CSV columns: x,y,z,w,filename
 Saves: pose_model_best.pt and pose_model_final.pt
 """
 import os
 import math
 import random
+import logging
 import numpy as np
 import pandas as pd
 from PIL import Image
@@ -23,15 +24,24 @@ BATCH_SIZE = 32
 NUM_EPOCHS = 150
 LR = 1e-4
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-USE_COSINE_QUAT_LOSS = True   # True: quaternion cosine loss; False: MSE on quaternion (less ideal)
+USE_COSINE_QUAT_LOSS = True
 PRINT_EVERY_BATCH = 20
 SEED = 42
 os.makedirs("checkpoints", exist_ok=True)
 
-# deterministic-ish
+# deterministic
 random.seed(SEED)
 np.random.seed(SEED)
 torch.manual_seed(SEED)
+
+# ============== LOGGING ==============
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    handlers=[logging.StreamHandler()]
+)
+log = logging.getLogger(__name__)
+log.info(f"Using device: {DEVICE}")
 
 # ============== MODEL ==============
 class PoseModel(nn.Module):
@@ -55,7 +65,6 @@ class PoseModel(nn.Module):
 # ============== LOSSES ==============
 class QuaternionCosineLoss(nn.Module):
     def forward(self, pred, target):
-        # pred and target expected normalized
         dot = torch.sum(pred * target, dim=1)
         return (1.0 - torch.abs(dot)).mean()
 
@@ -79,10 +88,9 @@ class PoseDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         row = self.df.iloc[idx]
         q = torch.tensor([row["x"], row["y"], row["z"], row["w"]], dtype=torch.float32)
-        q = q / (torch.norm(q) + 1e-8)  # normalize target
+        q = q / (torch.norm(q) + 1e-8)
         path = os.path.join(self.image_dir, row["filename"]).replace(".png",".jpg")
         if not os.path.exists(path):
-            # fallback: try without directories (some CSVs include subfolders)
             basename = os.path.basename(row["filename"])
             alt = os.path.join(self.image_dir, basename)
             if os.path.exists(alt):
@@ -91,7 +99,6 @@ class PoseDataset(torch.utils.data.Dataset):
                 raise FileNotFoundError(f"Image not found: {path}")
 
         img = Image.open(path).convert("RGBA")
-        # flatten alpha onto white
         if img.mode == "RGBA":
             bg = Image.new("RGB", img.size, (255,255,255))
             bg.paste(img, mask=img.split()[3])
@@ -137,6 +144,8 @@ best_val = float("inf")
 patience = 25
 patience_counter = 0
 
+log.info(f"Starting training for {NUM_EPOCHS} epochs...")
+
 # ============== TRAIN LOOP ==============
 for epoch in range(1, NUM_EPOCHS+1):
     model.train()
@@ -151,7 +160,7 @@ for epoch in range(1, NUM_EPOCHS+1):
         optimizer.step()
         running += loss.item()
         if i % PRINT_EVERY_BATCH == 0:
-            print(f"[Epoch {epoch}] Batch {i}/{len(train_loader)} loss={loss.item():.4f}")
+            log.info(f"[Epoch {epoch}] Batch {i}/{len(train_loader)} loss={loss.item():.4f}")
 
     avg_train = running / max(1, len(train_loader))
 
@@ -167,19 +176,19 @@ for epoch in range(1, NUM_EPOCHS+1):
     avg_val = vloss / max(1, len(val_loader))
     scheduler.step(avg_val)
 
-    print(f"Epoch {epoch} summary -> train={avg_train:.4f} val={avg_val:.4f} lr={optimizer.param_groups[0]['lr']:.2e}")
+    log.info(f"Epoch {epoch} summary -> train={avg_train:.4f} val={avg_val:.4f} lr={optimizer.param_groups[0]['lr']:.2e}")
 
     if avg_val < best_val:
         best_val = avg_val
         patience_counter = 0
         torch.save(model.state_dict(), os.path.join("checkpoints", "pose_model_best.pt"))
-        print("Saved NEW BEST")
+        log.info("Saved NEW BEST model")
     else:
         patience_counter += 1
-        print(f"No improvement ({patience_counter}/{patience})")
+        log.info(f"No improvement ({patience_counter}/{patience})")
         if patience_counter >= patience:
-            print("EARLY STOPPING")
+            log.info("EARLY STOPPING")
             break
 
 torch.save(model.state_dict(), os.path.join("checkpoints", "pose_model_final.pt"))
-print("Training complete. Best val:", best_val)
+log.info(f"Training complete. Best val: {best_val}")
