@@ -1,5 +1,5 @@
-# Base image with CUDA 12.2 runtime
-FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04
+# Use CUDA 11.4 runtime (compatible with Tesla K80 + driver 470)
+FROM nvidia/cuda:11.4.3-runtime-ubuntu22.04
 
 # Set working directory
 WORKDIR /workspace
@@ -9,15 +9,18 @@ RUN apt-get update && \
     apt-get install -y python3 python3-pip git && \
     rm -rf /var/lib/apt/lists/*
 
+# Upgrade pip (prevents common build errors)
+RUN pip3 install --upgrade pip
+
 # Copy requirements and install
 COPY requirements.txt .
 RUN pip3 install --no-cache-dir -r requirements.txt
 
-# Copy code + dataset
+# Copy code & dataset
 COPY . .
 
 # Make folder for checkpoints
 RUN mkdir -p /workspace/checkpoints
 
-# Default command: run training
+# Default command
 CMD ["python3", "pose_trainer.py"]

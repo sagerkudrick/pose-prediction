@@ -1,5 +1,8 @@
-torch>=2.2.0
-torchvision>=0.17.0
+torch==1.12.1+cu113
+torchvision==0.13.1+cu113
+torchaudio==0.12.1
+-f https://download.pytorch.org/whl/cu113
+
 numpy>=1.25.0
 pandas>=2.1.0
 Pillow>=10.0.0
