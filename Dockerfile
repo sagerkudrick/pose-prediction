@@ -30,4 +30,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Default command to run your training script
-CMD ["python3", "trainer_rewrite.py"]
+CMD ["python3", "pose_trainer.py"]
