@@ -8,6 +8,8 @@ RUN apt-get update && apt-get install -y python3 python3-pip git && \
 
 # Copy your requirements
 COPY requirements.txt .
+RUN pip install --no-cache-dir torch==1.12.1+cu114 torchvision==0.13.1+cu114 \
+    --index-url https://download.pytorch.org/whl/cu114/torch_stable.html
 
 # Install Python packages
 RUN pip3 install --no-cache-dir -r requirements.txt
