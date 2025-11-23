@@ -1,6 +1,9 @@
-torch==1.12.1+cu114
-torchvision==0.13.1+cu114
+# Use a torch version built for CUDA 11 (11.x)
+torch==1.12.1+cu116
+torchvision==0.13.1+cu116
 torchaudio==0.12.1
-numpy
-pandas
-Pillow
+
+numpy>=1.25.0
+pandas>=2.1.0
+Pillow>=10.0.0
+scikit-learn>=1.3.0
