@@ -1,5 +1,5 @@
-# Use CUDA 11.3 runtime for Tesla K80 + PyTorch 1.12.1
-FROM nvidia/cuda:11.3.1-runtime-ubuntu22.04
+# CUDA 11.3 + Ubuntu 20.04 (VALID TAG, WORKS ON COOLIFY)
+FROM nvidia/cuda:11.3.1-runtime-ubuntu20.04
 
 WORKDIR /workspace
 
