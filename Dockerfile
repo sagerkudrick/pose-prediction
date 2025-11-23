@@ -1,22 +1,25 @@
-FROM nvidia/cuda:11.4.3-runtime-ubuntu20.04
+# Base image with CUDA 11.4 runtime
+FROM nvidia/cuda:11.4.3-runtime-ubuntu22.04
 
+# Set working directory
 WORKDIR /workspace
 
+# Install Python, pip, git, and build essentials
 RUN apt-get update && \
-    apt-get install -y python3 python3-pip git && \
+    apt-get install -y python3 python3-pip git build-essential && \
     rm -rf /var/lib/apt/lists/*
 
-# pip 20 is fine as long as we install torch by URL
+# Upgrade pip to a safe version
+RUN pip3 install --upgrade "pip<24"
+
+# Copy requirements.txt
 COPY requirements.txt .
+
+# Install Python dependencies
 RUN pip3 install --no-cache-dir -r requirements.txt
 
-# 🔥 Install torch 1.12.1 + cu113 via DIRECT WHEEL URL
-RUN pip3 install https://download.pytorch.org/whl/cu113/torch-1.12.1%2Bcu113-cp38-cp38-linux_x86_64.whl && \
-    pip3 install https://download.pytorch.org/whl/cu113/torchvision-0.13.1%2Bcu113-cp38-cp38-linux_x86_64.whl && \
-    pip3 install https://download.pytorch.org/whl/cu113/torchaudio-0.12.1%2Bcu113-cp38-cp38-linux_x86_64.whl
-
+# Copy your project files
 COPY . .
 
-RUN mkdir -p /workspace/checkpoints
-
+# Default command to run your trainer
 CMD ["python3", "pose_trainer.py"]
