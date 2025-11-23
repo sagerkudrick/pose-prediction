@@ -1,32 +1,14 @@
-# Use lightweight Python 3.8 base image
-FROM python:3.8-slim
+FROM nvidia/cuda:11.4.3-runtime-ubuntu22.04
 
-# Set working directory
 WORKDIR /workspace
 
-# Avoid prompts during package installs
-ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && \
+    apt-get install -y python3 python3-pip git && \
+    rm -rf /var/lib/apt/lists/*
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    git \
-    build-essential \
-    python3-dev \
-    libgl1-mesa-glx \
-    && rm -rf /var/lib/apt/lists/*
-
-# Upgrade pip
-RUN pip install --upgrade pip
-
-# Copy your requirements file
 COPY requirements.txt .
+RUN pip3 install --no-cache-dir -r requirements.txt
 
-# Install PyTorch with CUDA support and other dependencies
-RUN pip install --no-cache-dir -r requirements.txt \
-    -f https://download.pytorch.org/whl/cu116/torch_stable.html
-
-# Copy the rest of your project
 COPY . .
 
-# Default command to run your training script
-CMD ["python", "trainer_rewrite.py"]
+CMD ["python3", "pose_trainer.py"]
