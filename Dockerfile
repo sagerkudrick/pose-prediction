@@ -1,4 +1,4 @@
-FROM nvidia/cuda:11.3.1-runtime-ubuntu20.04
+FROM nvidia/cuda:11.3.1-runtime-ubuntu22.04
 
 WORKDIR /workspace
 
@@ -6,7 +6,6 @@ RUN apt-get update && \
     apt-get install -y python3 python3-pip git && \
     rm -rf /var/lib/apt/lists/*
 
-# IMPORTANT: pip 25 breaks old torch wheels
 RUN pip3 install "pip<24"
 
 COPY requirements.txt .
