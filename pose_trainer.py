@@ -1,11 +1,10 @@
 # trainer_rewrite.py
 """
-Trainer for quaternion regression with proper logging.
+Trainer for quaternion regression with proper logging and GPU monitoring.
 Expected CSV columns: x,y,z,w,filename
 Saves: pose_model_best.pt and pose_model_final.pt
 """
 import os
-import math
 import random
 import logging
 import numpy as np
@@ -16,10 +15,11 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, Subset
 from torchvision import transforms, models
 from sklearn.model_selection import train_test_split
+import subprocess
 
 # ============== CONFIG ==============
 CSV_PATH = "dataset_csv/rotations_20251122_124605.csv"
-IMG_DIR = "dataset"           # where images referenced by CSV live
+IMG_DIR = "dataset"
 BATCH_SIZE = 32
 NUM_EPOCHS = 150
 LR = 1e-4
@@ -42,6 +42,22 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 log.info(f"Using device: {DEVICE}")
+
+# ============== GPU USAGE HELPER ==============
+def log_gpu_usage():
+    if torch.cuda.is_available():
+        mem_alloc = torch.cuda.memory_allocated(DEVICE) / 1024**2
+        mem_reserved = torch.cuda.memory_reserved(DEVICE) / 1024**2
+        # optional: get GPU utilization via nvidia-smi
+        try:
+            result = subprocess.run(
+                ["nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
+                capture_output=True, text=True
+            )
+            util = result.stdout.strip()
+        except Exception:
+            util = "N/A"
+        log.info(f"[GPU] Memory allocated: {mem_alloc:.1f} MiB, Memory reserved: {mem_reserved:.1f} MiB, Utilization: {util}%")
 
 # ============== MODEL ==============
 class PoseModel(nn.Module):
@@ -159,8 +175,10 @@ for epoch in range(1, NUM_EPOCHS+1):
         loss.backward()
         optimizer.step()
         running += loss.item()
+        
         if i % PRINT_EVERY_BATCH == 0:
             log.info(f"[Epoch {epoch}] Batch {i}/{len(train_loader)} loss={loss.item():.4f}")
+            log_gpu_usage()
 
     avg_train = running / max(1, len(train_loader))
 
@@ -177,6 +195,7 @@ for epoch in range(1, NUM_EPOCHS+1):
     scheduler.step(avg_val)
 
     log.info(f"Epoch {epoch} summary -> train={avg_train:.4f} val={avg_val:.4f} lr={optimizer.param_groups[0]['lr']:.2e}")
+    log_gpu_usage()
 
     if avg_val < best_val:
         best_val = avg_val
