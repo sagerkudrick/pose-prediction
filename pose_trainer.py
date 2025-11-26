@@ -64,6 +64,11 @@ class PoseModel(nn.Module):
     def __init__(self):
         super().__init__()
         backbone = models.resnet18(pretrained=True)
+        
+        # Replace adaptive avg pool with fixed 7x7 avg pool
+        backbone.avgpool = nn.AvgPool2d(kernel_size=7, stride=1)
+        
+        # Replace fully connected layers
         backbone.fc = nn.Sequential(
             nn.Linear(backbone.fc.in_features, 512),
             nn.ReLU(),
