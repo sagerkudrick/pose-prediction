@@ -131,12 +131,60 @@ class PoseDataset(torch.utils.data.Dataset):
             img = self.transform(img)
         return img, q
 
+class RandomGamma(object):
+    def __init__(self, gamma_min=0.7, gamma_max=1.5):
+        self.gamma_min = gamma_min
+        self.gamma_max = gamma_max
+
+    def __call__(self, img):
+        gamma = random.uniform(self.gamma_min, self.gamma_max)
+        return F.adjust_gamma(img, gamma)
+
+# class RandomDirectionalShading(object):
+#     def __init__(self, strength=0.4, probability=0.7):
+#         self.strength = strength
+#         self.probability = probability
+
+#     def __call__(self, img):
+#         if random.random() > self.probability:
+#             return img
+
+#         w, h = img.size
+#         angle = random.uniform(0, 2 * np.pi)
+#         dx, dy = np.cos(angle), np.sin(angle)
+
+#         # Build a gradient mask
+#         gradient = Image.new("L", (w, h))
+#         for y in range(h):
+#             for x in range(w):
+#                 # Project pixel onto light direction axis
+#                 v = (x * dx + y * dy) / (w + h)
+#                 v = 128 + v * 255 * self.strength
+#                 gradient.putpixel((x, y), int(np.clip(v, 0, 255)))
+
+#         gradient_rgb = gradient.convert("RGB")
+#         return Image.blend(img, gradient_rgb, 0.35)
+
 # ============== TRANSFORMS ==============
 train_transform = transforms.Compose([
-    transforms.Resize((224,224)),
-    transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1),
+    transforms.Resize((224, 224)),
+
+    # --- photometric augmentation ---
+    transforms.ColorJitter(
+        brightness=0.6,
+        contrast=0.6,
+        saturation=0.4,
+        hue=0.06
+    ),
+
+    RandomGamma(0.7, 1.6),          # exposure changes
+    #RandomDirectionalShading(0.35), # directional lighting on the object ONLY
+
     transforms.ToTensor(),
-    transforms.Normalize([0.5]*3, [0.5]*3)
+    transforms.Normalize(
+        mean=[0.485, 0.456, 0.406],
+        std=[0.229, 0.224, 0.225]
+    )
 ])
 
 val_transform = transforms.Compose([
