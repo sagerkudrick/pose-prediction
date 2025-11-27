@@ -35,12 +35,9 @@ model.load_state_dict(state_dict)
 
 model.eval()
 
-torch.onnx.export(
-    model,
-    dummy_input,
-    "resnet18_web.onnx",
-    opset_version=13,  # lower opset is more compatible
-    do_constant_folding=True,
-    input_names=['input'],
-    output_names=['output'],
-)
+torch.onnx.export(model, dummy_input, "model.onnx",
+                  opset_version=13,
+                  do_constant_folding=True,
+                  input_names=['input'],
+                  output_names=['output'],
+                  external_data=False)
