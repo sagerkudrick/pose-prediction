@@ -16,6 +16,7 @@ from torch.utils.data import DataLoader, Subset
 from torchvision import transforms, models
 from sklearn.model_selection import train_test_split
 import subprocess
+import torchvision.transforms.functional as F
 
 # ============== CONFIG ==============
 CSV_PATH = "dataset_csv/rotations_20251122_124605.csv"
