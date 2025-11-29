@@ -36,8 +36,10 @@ model.load_state_dict(state_dict)
 model.eval()
 
 torch.onnx.export(model, dummy_input, "model.onnx",
-                  opset_version=13,
+                  opset_version=8,
                   do_constant_folding=True,
                   input_names=['input'],
                   output_names=['output'],
-                  external_data=False)
+                  external_data=False,
+                dynamic_axes={'input': {0: 'batch'}, 'output': {0: 'batch'}}
+)

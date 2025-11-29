@@ -22,8 +22,8 @@ import torchvision.transforms.functional as F
 CSV_PATH = "dataset_csv/rotations_20251127_130226.csv"
 IMG_DIR = "dataset"
 BATCH_SIZE = 32
-NUM_EPOCHS = 150
-LR = 1e-4
+NUM_EPOCHS = 250
+LR = 5e-5
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 USE_COSINE_QUAT_LOSS = True
 PRINT_EVERY_BATCH = 20
@@ -211,7 +211,7 @@ criterion = QuaternionCosineLoss() if USE_COSINE_QUAT_LOSS else QuaternionMSELos
 optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=1e-4)
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=5)
 best_val = float("inf")
-patience = 25
+patience = 40
 patience_counter = 0
 
 log.info(f"Starting training for {NUM_EPOCHS} epochs...")
