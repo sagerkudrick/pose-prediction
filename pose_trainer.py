@@ -19,7 +19,7 @@ import subprocess
 import torchvision.transforms.functional as F
 
 # ============== CONFIG ==============
-CSV_PATH = "dataset_csv/rotations_20251129_213001.csv"
+CSV_PATH = "dataset_csv/rotations_20251129_230441.csv"
 IMG_DIR = "dataset"
 BATCH_SIZE = 32
 NUM_EPOCHS = 250

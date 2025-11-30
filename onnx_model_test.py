@@ -17,7 +17,7 @@ TEST_DIR = r"C:\Users\me\Desktop\pose-prediction\dataset\test"
 DATASET_DIR = r"C:\Users\me\Desktop\pose-prediction\dataset"
 ONNX_MODEL = "model.onnx"
 FIND_NEAREST = True
-CSV_GLOB = "dataset_csv/rotations_20251122_124605.csv"
+CSV_GLOB = "dataset_csv/rotations_20251129_213001.csv"
 
 # ================= TRANSFORMS =================
 transform = transforms.Compose([
