@@ -29,7 +29,7 @@ class PoseModel(nn.Module):
 model = PoseModel()
 
 # Load your trained weights
-checkpoint_path = "pose_model_final.pt"  # replace with your .pt file
+checkpoint_path = "pose_model_best.pt"  # replace with your .pt file
 state_dict = torch.load(checkpoint_path, map_location='cpu')  # use map_location='cpu' if no GPU
 model.load_state_dict(state_dict)
 
