@@ -22,8 +22,8 @@ import torchvision.transforms.functional as F
 CSV_PATH = "dataset_csv/rotations_20251130_235509.csv"
 IMG_DIR = "dataset"
 BATCH_SIZE = 16
-NUM_EPOCHS = 250
-LR = 5e-5
+NUM_EPOCHS = 350
+LR = 1e-4
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 USE_COSINE_QUAT_LOSS = True
 PRINT_EVERY_BATCH = 20
@@ -212,7 +212,15 @@ model = PoseModel().to(DEVICE)
 criterion = QuaternionCosineLoss() if USE_COSINE_QUAT_LOSS else QuaternionMSELoss()
 optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=1e-4)
 #scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=5)
-scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=NUM_EPOCHS)
+#scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=NUM_EPOCHS)
+
+optimizer = torch.optim.AdamW(model.parameters(), lr=5e-4, weight_decay=1e-4)
+scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=50, eta_min=1e-6)
+
+# Use ReduceLROnPlateau for validation-based adaptation
+plateau_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    optimizer, factor=0.5, patience=10, min_lr=1e-6, verbose=True
+)
 
 best_val = float("inf")
 patience = 40
