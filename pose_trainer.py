@@ -202,8 +202,9 @@ train_idx, val_idx = train_test_split(indices, test_size=0.2, random_state=SEED)
 train_ds = Subset(PoseDataset(CSV_PATH, IMG_DIR, train_transform), train_idx)
 val_ds = Subset(PoseDataset(CSV_PATH, IMG_DIR, val_transform), val_idx)
 
-train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=6, pin_memory=True)
-val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True)
+# adding num_worker
+train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, pin_memory=True)
+val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=2, pin_memory=True)
 
 # ============== SETUP ==============
 model = PoseModel().to(DEVICE)
