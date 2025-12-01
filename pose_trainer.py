@@ -21,9 +21,9 @@ import torchvision.transforms.functional as F
 # ============== CONFIG ==============
 CSV_PATH = "dataset_csv/rotations_20251130_235509.csv"
 IMG_DIR = "dataset"
-BATCH_SIZE = 64
+BATCH_SIZE = 16
 NUM_EPOCHS = 250
-LR = 5e-4
+LR = 5e-5
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 USE_COSINE_QUAT_LOSS = True
 PRINT_EVERY_BATCH = 20
