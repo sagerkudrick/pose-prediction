@@ -203,14 +203,17 @@ train_ds = Subset(PoseDataset(CSV_PATH, IMG_DIR, train_transform), train_idx)
 val_ds = Subset(PoseDataset(CSV_PATH, IMG_DIR, val_transform), val_idx)
 
 # adding num_worker
-train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, pin_memory=True)
-val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True)
+train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=16, pin_memory=True)
+val_loader   = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True)
+log.info(f"Training samples: {len(train_ds)}, Validation samples: {len(val_ds)}")
 
 # ============== SETUP ==============
 model = PoseModel().to(DEVICE)
 criterion = QuaternionCosineLoss() if USE_COSINE_QUAT_LOSS else QuaternionMSELoss()
 optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=1e-4)
-scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=5)
+#scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=5)
+scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=NUM_EPOCHS)
+
 best_val = float("inf")
 patience = 40
 patience_counter = 0
