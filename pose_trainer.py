@@ -1,6 +1,6 @@
+# trainer_rewrite.py
 """
-Optimized Trainer for quaternion regression - A5000 GPU
-ONNX-compatible export
+Trainer for quaternion regression with proper logging and GPU monitoring.
 Expected CSV columns: x,y,z,w,filename
 Saves: pose_model_best.pt and pose_model_final.pt
 """
@@ -21,12 +21,12 @@ import torchvision.transforms.functional as F
 # ============== CONFIG ==============
 CSV_PATH = "dataset_csv/rotations_20251203_150653.csv"
 IMG_DIR = "dataset"
-BATCH_SIZE = 64  # A5000 can handle this easily
-NUM_EPOCHS = 400
-LR = 2e-3  # higher LR, cosine will decay it
+BATCH_SIZE = 16
+NUM_EPOCHS = 350
+LR = 1e-4
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 USE_COSINE_QUAT_LOSS = True
-PRINT_EVERY_BATCH = 10
+PRINT_EVERY_BATCH = 20
 SEED = 42
 os.makedirs("checkpoints", exist_ok=True)
 
@@ -34,7 +34,6 @@ os.makedirs("checkpoints", exist_ok=True)
 random.seed(SEED)
 np.random.seed(SEED)
 torch.manual_seed(SEED)
-torch.cuda.manual_seed_all(SEED)
 
 # ============== LOGGING ==============
 logging.basicConfig(
@@ -50,6 +49,7 @@ def log_gpu_usage():
     if torch.cuda.is_available():
         mem_alloc = torch.cuda.memory_allocated(DEVICE) / 1024**2
         mem_reserved = torch.cuda.memory_reserved(DEVICE) / 1024**2
+        # optional: get GPU utilization via nvidia-smi
         try:
             result = subprocess.run(
                 ["nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
@@ -58,7 +58,7 @@ def log_gpu_usage():
             util = result.stdout.strip()
         except Exception:
             util = "N/A"
-        log.info(f"[GPU] Alloc: {mem_alloc:.1f} MiB, Reserved: {mem_reserved:.1f} MiB, Util: {util}%")
+        log.info(f"[GPU] Memory allocated: {mem_alloc:.1f} MiB, Memory reserved: {mem_reserved:.1f} MiB, Utilization: {util}%")
 
 # ============== MODEL ==============
 class PoseModel(nn.Module):
@@ -66,19 +66,17 @@ class PoseModel(nn.Module):
         super().__init__()
         backbone = models.resnet18(pretrained=True)
         
-        # Replace adaptive avg pool with fixed 7x7 avg pool (ONNX compatible)
+        # Replace adaptive avg pool with fixed 7x7 avg pool
         backbone.avgpool = nn.AvgPool2d(kernel_size=7, stride=1)
         
-        # Replace fully connected layers with ONNX-safe architecture
+        # Replace fully connected layers
         backbone.fc = nn.Sequential(
             nn.Linear(backbone.fc.in_features, 512),
-            nn.BatchNorm1d(512),
-            nn.ReLU(),
-            nn.Dropout(0.4),
-            nn.Linear(512, 256),
-            nn.BatchNorm1d(256),
             nn.ReLU(),
             nn.Dropout(0.3),
+            nn.Linear(512, 256),
+            nn.ReLU(),
+            nn.Dropout(0.2),
             nn.Linear(256, 4)
         )
         self.backbone = backbone
@@ -89,20 +87,11 @@ class PoseModel(nn.Module):
 # ============== LOSSES ==============
 class QuaternionCosineLoss(nn.Module):
     def forward(self, pred, target):
-        # Normalize both - ONNX safe operations
-        pred_norm = torch.norm(pred, dim=1, keepdim=True).clamp(min=1e-8)
-        target_norm = torch.norm(target, dim=1, keepdim=True).clamp(min=1e-8)
-        pred = pred / pred_norm
-        target = target / target_norm
         dot = torch.sum(pred * target, dim=1)
         return (1.0 - torch.abs(dot)).mean()
 
 class QuaternionMSELoss(nn.Module):
     def forward(self, pred, target):
-        pred_norm = torch.norm(pred, dim=1, keepdim=True).clamp(min=1e-8)
-        target_norm = torch.norm(target, dim=1, keepdim=True).clamp(min=1e-8)
-        pred = pred / pred_norm
-        target = target / target_norm
         return nn.functional.mse_loss(pred, target)
 
 # ============== DATASET ==============
@@ -121,8 +110,7 @@ class PoseDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         row = self.df.iloc[idx]
         q = torch.tensor([row["x"], row["y"], row["z"], row["w"]], dtype=torch.float32)
-        q_norm = torch.norm(q).clamp(min=1e-8)
-        q = q / q_norm
+        q = q / (torch.norm(q) + 1e-8)
         path = os.path.join(self.image_dir, row["filename"]).replace(".png",".jpg")
         if not os.path.exists(path):
             basename = os.path.basename(row["filename"])
@@ -145,7 +133,7 @@ class PoseDataset(torch.utils.data.Dataset):
         return img, q
 
 class RandomGamma(object):
-    def __init__(self, gamma_min=0.6, gamma_max=1.8):
+    def __init__(self, gamma_min=0.7, gamma_max=1.5):
         self.gamma_min = gamma_min
         self.gamma_max = gamma_max
 
@@ -153,36 +141,46 @@ class RandomGamma(object):
         gamma = random.uniform(self.gamma_min, self.gamma_max)
         return F.adjust_gamma(img, gamma)
 
-# ============== AGGRESSIVE AUGMENTATION ==============
+# class RandomDirectionalShading(object):
+#     def __init__(self, strength=0.4, probability=0.7):
+#         self.strength = strength
+#         self.probability = probability
+
+#     def __call__(self, img):
+#         if random.random() > self.probability:
+#             return img
+
+#         w, h = img.size
+#         angle = random.uniform(0, 2 * np.pi)
+#         dx, dy = np.cos(angle), np.sin(angle)
+
+#         # Build a gradient mask
+#         gradient = Image.new("L", (w, h))
+#         for y in range(h):
+#             for x in range(w):
+#                 # Project pixel onto light direction axis
+#                 v = (x * dx + y * dy) / (w + h)
+#                 v = 128 + v * 255 * self.strength
+#                 gradient.putpixel((x, y), int(np.clip(v, 0, 255)))
+
+#         gradient_rgb = gradient.convert("RGB")
+#         return Image.blend(img, gradient_rgb, 0.35)
+
+# ============== TRANSFORMS ==============
 train_transform = transforms.Compose([
     transforms.Resize((224, 224)),
-    
-    # Photometric augmentation - aggressive
-    transforms.RandomApply([
-        transforms.ColorJitter(
-            brightness=1.0,
-            contrast=1.0,
-            saturation=0.8,
-            hue=0.15
-        )
-    ], p=0.9),
-    
-    RandomGamma(0.5, 2.0),
-    
-    transforms.RandomApply([
-        transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 2.0))
-    ], p=0.5),
-    
-    transforms.RandomApply([
-        transforms.RandomInvert(p=0.3)
-    ], p=0.2),
-    
-    transforms.RandomEqualize(p=0.3),
-    
-    transforms.RandomApply([
-        transforms.RandomAutocontrast(p=0.5)
-    ], p=0.3),
-    
+
+    # --- photometric augmentation ---
+    transforms.ColorJitter(
+        brightness=0.6,
+        contrast=0.6,
+        saturation=0.4,
+        hue=0.06
+    ),
+
+    RandomGamma(0.7, 1.6),          # exposure changes
+    #RandomDirectionalShading(0.35), # directional lighting on the object ONLY
+
     transforms.ToTensor(),
     transforms.Normalize(
         mean=[0.485, 0.456, 0.406],
@@ -193,41 +191,42 @@ train_transform = transforms.Compose([
 val_transform = transforms.Compose([
     transforms.Resize((224,224)),
     transforms.ToTensor(),
-    transforms.Normalize(
-        mean=[0.485, 0.456, 0.406],
-        std=[0.229, 0.224, 0.225]
-    )
+    transforms.Normalize([0.5]*3, [0.5]*3)
 ])
 
 # ============== LOAD DATA ==============
 df = pd.read_csv(CSV_PATH)
 indices = list(range(len(df)))
-train_idx, val_idx = train_test_split(indices, test_size=0.15, random_state=SEED)
+train_idx, val_idx = train_test_split(indices, test_size=0.2, random_state=SEED)
 
 train_ds = Subset(PoseDataset(CSV_PATH, IMG_DIR, train_transform), train_idx)
 val_ds = Subset(PoseDataset(CSV_PATH, IMG_DIR, val_transform), val_idx)
 
-train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=20, pin_memory=True)
-val_loader   = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=8, pin_memory=True)
+# adding num_worker
+train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=16, pin_memory=True)
+val_loader   = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True)
 log.info(f"Training samples: {len(train_ds)}, Validation samples: {len(val_ds)}")
 
 # ============== SETUP ==============
 model = PoseModel().to(DEVICE)
 criterion = QuaternionCosineLoss() if USE_COSINE_QUAT_LOSS else QuaternionMSELoss()
+optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=1e-4)
+#scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=5)
+#scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=NUM_EPOCHS)
 
-# AdamW with higher LR, cosine decay
-optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=5e-4)
-scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-    optimizer, T_0=50, T_mult=1.5, eta_min=1e-6
+optimizer = torch.optim.AdamW(model.parameters(), lr=5e-4, weight_decay=1e-4)
+scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=50, eta_min=1e-6)
+
+# Use ReduceLROnPlateau for validation-based adaptation
+plateau_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    optimizer, factor=0.5, patience=10, min_lr=1e-6, verbose=True
 )
 
-# Early stopping
 best_val = float("inf")
-patience = 50
+patience = 40
 patience_counter = 0
 
 log.info(f"Starting training for {NUM_EPOCHS} epochs...")
-log.info(f"Model: ResNet18 | Batch: {BATCH_SIZE} | LR: {LR} | Augmentation: AGGRESSIVE")
 
 # ============== TRAIN LOOP ==============
 for epoch in range(1, NUM_EPOCHS+1):
@@ -237,15 +236,15 @@ for epoch in range(1, NUM_EPOCHS+1):
         imgs, targets = imgs.to(DEVICE), targets.to(DEVICE)
         optimizer.zero_grad()
         preds = model(imgs)
-        preds = preds / (torch.norm(preds, dim=1, keepdim=True).clamp(min=1e-8))
+        preds = preds / (torch.norm(preds, dim=1, keepdim=True) + 1e-8)
         loss = criterion(preds, targets)
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
         running += loss.item()
         
         if i % PRINT_EVERY_BATCH == 0:
-            log.info(f"[Epoch {epoch}] Batch {i}/{len(train_loader)} loss={loss.item():.6f}")
+            log.info(f"[Epoch {epoch}] Batch {i}/{len(train_loader)} loss={loss.item():.4f}")
+            log_gpu_usage()
 
     avg_train = running / max(1, len(train_loader))
 
@@ -256,28 +255,25 @@ for epoch in range(1, NUM_EPOCHS+1):
         for imgs, targets in val_loader:
             imgs, targets = imgs.to(DEVICE), targets.to(DEVICE)
             preds = model(imgs)
-            preds = preds / (torch.norm(preds, dim=1, keepdim=True).clamp(min=1e-8))
+            preds = preds / (torch.norm(preds, dim=1, keepdim=True) + 1e-8)
             vloss += criterion(preds, targets).item()
     avg_val = vloss / max(1, len(val_loader))
-    scheduler.step()
+    scheduler.step(avg_val)
 
-    log.info(f"Epoch {epoch} -> train={avg_train:.6f} val={avg_val:.6f} lr={optimizer.param_groups[0]['lr']:.2e}")
+    log.info(f"Epoch {epoch} summary -> train={avg_train:.4f} val={avg_val:.4f} lr={optimizer.param_groups[0]['lr']:.2e}")
     log_gpu_usage()
 
     if avg_val < best_val:
         best_val = avg_val
         patience_counter = 0
         torch.save(model.state_dict(), os.path.join("checkpoints", "pose_model_best.pt"))
-        log.info(f"✓ NEW BEST model (val={best_val:.6f})")
+        log.info("Saved NEW BEST model")
     else:
         patience_counter += 1
-        if patience_counter % 10 == 0:
-            log.info(f"No improvement ({patience_counter}/{patience})")
+        log.info(f"No improvement ({patience_counter}/{patience})")
         if patience_counter >= patience:
-            log.info("EARLY STOPPING triggered")
+            log.info("EARLY STOPPING")
             break
 
 torch.save(model.state_dict(), os.path.join("checkpoints", "pose_model_final.pt"))
-log.info(f"Training complete. Best val: {best_val:.6f}")
-
-log.info("Training complete. Use export_onnx.py to convert to ONNX separately.")
+log.info(f"Training complete. Best val: {best_val}")
