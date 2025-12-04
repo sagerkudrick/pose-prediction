@@ -63,54 +63,24 @@ def log_gpu_usage():
         log.info(f"[GPU] Memory allocated: {mem_alloc:.1f} MiB, reserved: {mem_reserved:.1f} MiB, Util: {util}%")
 
 # ============== MODEL ==============
-class CoordConv2d(nn.Module):
-    """
-    Simple CoordConv layer: concatenates x/y coordinate channels to input
-    """
-    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, bias=True):
-        super().__init__()
-        self.add_coords = True
-        self.conv = nn.Conv2d(in_channels + 2, out_channels, kernel_size, stride=stride, padding=padding, bias=bias)
-
-    def forward(self, x):
-        batch_size, _, h, w = x.size()
-        device = x.device
-
-        # Create coordinate channels
-        xx_channel = torch.linspace(-1, 1, w, device=device).repeat(h, 1)
-        yy_channel = torch.linspace(-1, 1, h, device=device).unsqueeze(1).repeat(1, w)
-        xx_channel = xx_channel.unsqueeze(0).unsqueeze(0).expand(batch_size, -1, -1, -1)
-        yy_channel = yy_channel.unsqueeze(0).unsqueeze(0).expand(batch_size, -1, -1, -1)
-
-        x = torch.cat([x, xx_channel, yy_channel], dim=1)
-        return self.conv(x)
-
-
 class PoseModel(nn.Module):
     def __init__(self):
         super().__init__()
 
-        # Load standard ResNet-18 backbone
-        backbone = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
+        # Load pretrained MobileNetV3-Large
+        backbone = models.mobilenet_v3_large(weights=models.MobileNet_V3_Large_Weights.DEFAULT)
 
-        # Replace first conv with CoordConv
-        in_channels = 3
-        out_channels = 64
-        kernel_size = 7
-        stride = 2
-        padding = 3
-        backbone.conv1 = CoordConv2d(in_channels, out_channels, kernel_size, stride=stride, padding=padding, bias=False)
+        # Replace classifier with a quaternion head
+        in_features = backbone.classifier[0].in_features
 
-        # Replace final FC with quaternion head
-        in_features = backbone.fc.in_features
-        backbone.fc = nn.Sequential(
+        backbone.classifier = nn.Sequential(
             nn.Linear(in_features, 512),
-            nn.ReLU(),
-            nn.Dropout(0.3),
+            nn.Hardswish(),
+            nn.Dropout(0.2),
 
             nn.Linear(512, 256),
-            nn.ReLU(),
-            nn.Dropout(0.2),
+            nn.Hardswish(),
+            nn.Dropout(0.1),
 
             nn.Linear(256, 4)   # quaternion output
         )
