@@ -6,21 +6,25 @@ dummy_input = torch.randn(1, 3, 224, 224)
 class PoseModel(nn.Module):
     def __init__(self):
         super().__init__()
-        backbone = models.resnet18(pretrained=True)
-        
-        # Replace adaptive avg pool with fixed 7x7 avg pool
-        backbone.avgpool = nn.AvgPool2d(kernel_size=7, stride=1)
-        
-        # Replace fully connected layers
-        backbone.fc = nn.Sequential(
-            nn.Linear(backbone.fc.in_features, 512),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(512, 256),
-            nn.ReLU(),
+
+        # Load pretrained MobileNetV3-Large
+        backbone = models.mobilenet_v3_large(weights=models.MobileNet_V3_Large_Weights.DEFAULT)
+
+        # Replace classifier with a quaternion head
+        in_features = backbone.classifier[0].in_features
+
+        backbone.classifier = nn.Sequential(
+            nn.Linear(in_features, 512),
+            nn.Hardswish(),
             nn.Dropout(0.2),
-            nn.Linear(256, 4)
+
+            nn.Linear(512, 256),
+            nn.Hardswish(),
+            nn.Dropout(0.1),
+
+            nn.Linear(256, 4)   # quaternion output
         )
+
         self.backbone = backbone
 
     def forward(self, x):
