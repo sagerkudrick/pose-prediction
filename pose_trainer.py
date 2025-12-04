@@ -254,10 +254,7 @@ def main():
         model.eval()
         vloss = 0.0
         with torch.no_grad():
-
-            preds = model(torch.cat([imgs[:16] for imgs,_ in train_loader], dim=0))
-            print("Output norm mean:", preds.norm(dim=1).mean().item())
-
+            
             for imgs, targets in val_loader:
                 imgs, targets = imgs.to(DEVICE), targets.to(DEVICE)
                 preds = model(imgs)
