@@ -2,7 +2,7 @@ from PIL import Image
 import os
 
 # Paths
-input_dir = r"C:\Users\me\Desktop\isotope-case\renders"
+input_dir = r"C:\Users\me\Desktop\pose-prediction\dataset"
 output_dir = os.path.join(input_dir, "jpg_folder")
 os.makedirs(output_dir, exist_ok=True)
 

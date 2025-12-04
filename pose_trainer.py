@@ -19,7 +19,7 @@ import subprocess
 import torchvision.transforms.functional as F
 
 # ============== CONFIG ==============
-CSV_PATH = "dataset_csv/rotations_20251203_134115.csv"
+CSV_PATH = "dataset_csv/rotations_20251203_150653.csv"
 IMG_DIR = "dataset"
 BATCH_SIZE = 64  # A5000 can handle this easily
 NUM_EPOCHS = 400
@@ -218,7 +218,7 @@ criterion = QuaternionCosineLoss() if USE_COSINE_QUAT_LOSS else QuaternionMSELos
 # AdamW with higher LR, cosine decay
 optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=5e-4)
 scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-    optimizer, T_0=50, T_mult=1.5, eta_min=1e-6
+    optimizer, T_0=50, T_mult=2, eta_min=1e-6
 )
 
 # Early stopping
