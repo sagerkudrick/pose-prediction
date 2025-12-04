@@ -65,19 +65,17 @@ class PoseModel(nn.Module):
         # Replace fully connected layers with ONNX-safe architecture
         backbone.fc = nn.Sequential(
             nn.Linear(backbone.fc.in_features, 512),
-            nn.BatchNorm1d(512),
             nn.ReLU(),
-            nn.Dropout(0.4),
             nn.Linear(512, 256),
-            nn.BatchNorm1d(256),
             nn.ReLU(),
-            nn.Dropout(0.3),
             nn.Linear(256, 4)
         )
         self.backbone = backbone
 
     def forward(self, x):
-        return self.backbone(x)
+        q = self.backbone(x)
+        q = q / torch.norm(q, dim=1, keepdim=True).clamp(min=1e-8)
+        return q
 
 # ============== LOSSES ==============
 class QuaternionCosineLoss(nn.Module):
@@ -256,6 +254,10 @@ def main():
         model.eval()
         vloss = 0.0
         with torch.no_grad():
+
+            preds = model(torch.cat([imgs[:16] for imgs,_ in train_loader], dim=0))
+            print("Output norm mean:", preds.norm(dim=1).mean().item())
+
             for imgs, targets in val_loader:
                 imgs, targets = imgs.to(DEVICE), targets.to(DEVICE)
                 preds = model(imgs)

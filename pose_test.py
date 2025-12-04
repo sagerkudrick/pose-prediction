@@ -186,24 +186,30 @@ import pandas as pd
 
 # ============== CONFIG ==============
 DATASET_DIR = r"C:\Users\me\Desktop\pose-prediction\dataset"
-MODEL_PATH = "pose_model_final.pt"
+MODEL_PATH = "pose_model_best.pt"
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 FIND_NEAREST = True
-CSV_GLOB = "rotations_20251122_124605.csv"
+CSV_GLOB = "rotations_20251203_150653.csv"
 
 # ============== MODEL ==============
 class PoseModel(nn.Module):
     def __init__(self):
         super().__init__()
         backbone = models.resnet18(pretrained=True)
+        
+        # Replace adaptive avg pool with fixed 7x7 avg pool (ONNX compatible)
         backbone.avgpool = nn.AvgPool2d(kernel_size=7, stride=1)
+        
+        # Replace fully connected layers with ONNX-safe architecture
         backbone.fc = nn.Sequential(
             nn.Linear(backbone.fc.in_features, 512),
+            nn.BatchNorm1d(512),
+            nn.ReLU(),
+            nn.Dropout(0.4),
+            nn.Linear(512, 256),
+            nn.BatchNorm1d(256),
             nn.ReLU(),
             nn.Dropout(0.3),
-            nn.Linear(512, 256),
-            nn.ReLU(),
-            nn.Dropout(0.2),
             nn.Linear(256, 4)
         )
         self.backbone = backbone
@@ -314,6 +320,6 @@ def infer_image(image_path):
 
 # ================= USAGE =================
 if __name__ == "__main__":
-    test_image = r"C:\Users\me\Desktop\pose-prediction\dataset\test\test2.jpg"  # <-- change this
+    test_image = r"C:\Users\me\Desktop\pose-prediction\dataset\test\download.png"  # <-- change this
     infer_image(test_image)
 
