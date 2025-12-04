@@ -243,7 +243,7 @@ criterion = CombinedQuaternionLoss(w_geo=0.7, w_mse=0.3)
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
 scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-    optimizer, T_0=40, T_mult=1, eta_min=1e-6
+    optimizer, T_0=40, T_mult=1.5, eta_min=1e-6
 )
 
 best_val = float("inf")
@@ -259,7 +259,7 @@ def train():
     for epoch in range(1, NUM_EPOCHS + 1):
         model.train()
         running_loss = 0.0
-    
+        
         for i, (imgs, targets) in enumerate(train_loader):
             imgs, targets = imgs.to(DEVICE), targets.to(DEVICE)
             
@@ -280,38 +280,38 @@ def train():
             if i % PRINT_EVERY_BATCH == 0:
                 log.info(f"[E{epoch}] Batch {i}/{len(train_loader)} loss={loss.item():.6f}")
 
-    avg_train = running_loss / len(train_loader)
+            avg_train = running_loss / len(train_loader)
 
-    # Validation
-    model.eval()
-    val_loss = 0.0
-    with torch.no_grad():
-        for imgs, targets in val_loader:
-            imgs, targets = imgs.to(DEVICE), targets.to(DEVICE)
-            preds = model(imgs)
-            preds = preds / (torch.norm(preds, dim=1, keepdim=True).clamp(min=1e-8))
-            val_loss += criterion(preds, targets).item()
-    
-    avg_val = val_loss / len(val_loader)
-    scheduler.step()
-
-    log.info(f"Epoch {epoch} | train_loss={avg_train:.6f} | val_loss={avg_val:.6f} | lr={optimizer.param_groups[0]['lr']:.2e}")
-    log_gpu_usage()
-
-    if avg_val < best_val:
-        best_val = avg_val
-        patience_counter = 0
-        torch.save(model.state_dict(), os.path.join("checkpoints", "pose_model_best.pt"))
-        log.info(f"✓ NEW BEST (val={best_val:.6f})")
-    else:
-        patience_counter += 1
-        if patience_counter >= patience:
-            log.info("Early stopping triggered")
+            # Validation
+            model.eval()
+            val_loss = 0.0
+            with torch.no_grad():
+                for imgs, targets in val_loader:
+                    imgs, targets = imgs.to(DEVICE), targets.to(DEVICE)
+                    preds = model(imgs)
+                    preds = preds / (torch.norm(preds, dim=1, keepdim=True).clamp(min=1e-8))
+                    val_loss += criterion(preds, targets).item()
             
+            avg_val = val_loss / len(val_loader)
+            scheduler.step()
 
-    torch.save(model.state_dict(), os.path.join("checkpoints", "pose_model_final.pt"))
-    log.info(f"Training complete. Best val: {best_val:.6f}")
-    log.info("Use export_onnx.py to convert to ONNX separately.")
+            log.info(f"Epoch {epoch} | train_loss={avg_train:.6f} | val_loss={avg_val:.6f} | lr={optimizer.param_groups[0]['lr']:.2e}")
+            log_gpu_usage()
+
+            if avg_val < best_val:
+                best_val = avg_val
+                patience_counter = 0
+                torch.save(model.state_dict(), os.path.join("checkpoints", "pose_model_best.pt"))
+                log.info(f"✓ NEW BEST (val={best_val:.6f})")
+            else:
+                patience_counter += 1
+                if patience_counter >= patience:
+                    log.info("Early stopping triggered")
+                    
+
+        torch.save(model.state_dict(), os.path.join("checkpoints", "pose_model_final.pt"))
+        log.info(f"Training complete. Best val: {best_val:.6f}")
+        log.info("Use export_onnx.py to convert to ONNX separately.")
 
 if __name__ == "__main__":
     train()
