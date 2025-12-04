@@ -30,12 +30,6 @@ PRINT_EVERY_BATCH = 10
 SEED = 42
 os.makedirs("checkpoints", exist_ok=True)
 
-# deterministic
-random.seed(SEED)
-np.random.seed(SEED)
-torch.manual_seed(SEED)
-torch.cuda.manual_seed_all(SEED)
-
 # ============== LOGGING ==============
 logging.basicConfig(
     level=logging.INFO,
@@ -43,7 +37,6 @@ logging.basicConfig(
     handlers=[logging.StreamHandler()]
 )
 log = logging.getLogger(__name__)
-log.info(f"Using device: {DEVICE}")
 
 # ============== GPU USAGE HELPER ==============
 def log_gpu_usage():
@@ -199,85 +192,97 @@ val_transform = transforms.Compose([
     )
 ])
 
-# ============== LOAD DATA ==============
-df = pd.read_csv(CSV_PATH)
-indices = list(range(len(df)))
-train_idx, val_idx = train_test_split(indices, test_size=0.15, random_state=SEED)
+def main():
+    """Main training function"""
+    # deterministic
+    random.seed(SEED)
+    np.random.seed(SEED)
+    torch.manual_seed(SEED)
+    torch.cuda.manual_seed_all(SEED)
+    
+    log.info(f"Using device: {DEVICE}")
+    
+    # ============== LOAD DATA ==============
+    df = pd.read_csv(CSV_PATH)
+    indices = list(range(len(df)))
+    train_idx, val_idx = train_test_split(indices, test_size=0.15, random_state=SEED)
 
-train_ds = Subset(PoseDataset(CSV_PATH, IMG_DIR, train_transform), train_idx)
-val_ds = Subset(PoseDataset(CSV_PATH, IMG_DIR, val_transform), val_idx)
+    train_ds = Subset(PoseDataset(CSV_PATH, IMG_DIR, train_transform), train_idx)
+    val_ds = Subset(PoseDataset(CSV_PATH, IMG_DIR, val_transform), val_idx)
 
-train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=20, pin_memory=True)
-val_loader   = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=8, pin_memory=True)
-log.info(f"Training samples: {len(train_ds)}, Validation samples: {len(val_ds)}")
+    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=20, pin_memory=True)
+    val_loader   = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=8, pin_memory=True)
+    log.info(f"Training samples: {len(train_ds)}, Validation samples: {len(val_ds)}")
 
-# ============== SETUP ==============
-model = PoseModel().to(DEVICE)
-criterion = QuaternionCosineLoss() if USE_COSINE_QUAT_LOSS else QuaternionMSELoss()
+    # ============== SETUP ==============
+    model = PoseModel().to(DEVICE)
+    criterion = QuaternionCosineLoss() if USE_COSINE_QUAT_LOSS else QuaternionMSELoss()
 
-# AdamW with higher LR, cosine decay
-optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=5e-4)
-scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-    optimizer, T_0=50, T_mult=2, eta_min=1e-6
-)
+    # AdamW with higher LR, cosine decay
+    optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=5e-4)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+        optimizer, T_0=50, T_mult=2, eta_min=1e-6
+    )
 
-# Early stopping
-best_val = float("inf")
-patience = 50
-patience_counter = 0
+    # Early stopping
+    best_val = float("inf")
+    patience = 50
+    patience_counter = 0
 
-log.info(f"Starting training for {NUM_EPOCHS} epochs...")
-log.info(f"Model: ResNet18 | Batch: {BATCH_SIZE} | LR: {LR} | Augmentation: AGGRESSIVE")
+    log.info(f"Starting training for {NUM_EPOCHS} epochs...")
+    log.info(f"Model: ResNet18 | Batch: {BATCH_SIZE} | LR: {LR} | Augmentation: AGGRESSIVE")
 
-# ============== TRAIN LOOP ==============
-for epoch in range(1, NUM_EPOCHS+1):
-    model.train()
-    running = 0.0
-    for i, (imgs, targets) in enumerate(train_loader):
-        imgs, targets = imgs.to(DEVICE), targets.to(DEVICE)
-        optimizer.zero_grad()
-        preds = model(imgs)
-        preds = preds / (torch.norm(preds, dim=1, keepdim=True).clamp(min=1e-8))
-        loss = criterion(preds, targets)
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        optimizer.step()
-        running += loss.item()
-        
-        if i % PRINT_EVERY_BATCH == 0:
-            log.info(f"[Epoch {epoch}] Batch {i}/{len(train_loader)} loss={loss.item():.6f}")
-
-    avg_train = running / max(1, len(train_loader))
-
-    # Validation
-    model.eval()
-    vloss = 0.0
-    with torch.no_grad():
-        for imgs, targets in val_loader:
+    # ============== TRAIN LOOP ==============
+    for epoch in range(1, NUM_EPOCHS+1):
+        model.train()
+        running = 0.0
+        for i, (imgs, targets) in enumerate(train_loader):
             imgs, targets = imgs.to(DEVICE), targets.to(DEVICE)
+            optimizer.zero_grad()
             preds = model(imgs)
             preds = preds / (torch.norm(preds, dim=1, keepdim=True).clamp(min=1e-8))
-            vloss += criterion(preds, targets).item()
-    avg_val = vloss / max(1, len(val_loader))
-    scheduler.step()
+            loss = criterion(preds, targets)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+            running += loss.item()
+            
+            if i % PRINT_EVERY_BATCH == 0:
+                log.info(f"[Epoch {epoch}] Batch {i}/{len(train_loader)} loss={loss.item():.6f}")
 
-    log.info(f"Epoch {epoch} -> train={avg_train:.6f} val={avg_val:.6f} lr={optimizer.param_groups[0]['lr']:.2e}")
-    log_gpu_usage()
+        avg_train = running / max(1, len(train_loader))
 
-    if avg_val < best_val:
-        best_val = avg_val
-        patience_counter = 0
-        torch.save(model.state_dict(), os.path.join("checkpoints", "pose_model_best.pt"))
-        log.info(f"✓ NEW BEST model (val={best_val:.6f})")
-    else:
-        patience_counter += 1
-        if patience_counter % 10 == 0:
-            log.info(f"No improvement ({patience_counter}/{patience})")
-        if patience_counter >= patience:
-            log.info("EARLY STOPPING triggered")
-            break
+        # Validation
+        model.eval()
+        vloss = 0.0
+        with torch.no_grad():
+            for imgs, targets in val_loader:
+                imgs, targets = imgs.to(DEVICE), targets.to(DEVICE)
+                preds = model(imgs)
+                preds = preds / (torch.norm(preds, dim=1, keepdim=True).clamp(min=1e-8))
+                vloss += criterion(preds, targets).item()
+        avg_val = vloss / max(1, len(val_loader))
+        scheduler.step()
 
-torch.save(model.state_dict(), os.path.join("checkpoints", "pose_model_final.pt"))
-log.info(f"Training complete. Best val: {best_val:.6f}")
+        log.info(f"Epoch {epoch} -> train={avg_train:.6f} val={avg_val:.6f} lr={optimizer.param_groups[0]['lr']:.2e}")
+        log_gpu_usage()
 
-log.info("Training complete. Use export_onnx.py to convert to ONNX separately.")
+        if avg_val < best_val:
+            best_val = avg_val
+            patience_counter = 0
+            torch.save(model.state_dict(), os.path.join("checkpoints", "pose_model_best.pt"))
+            log.info(f"✓ NEW BEST model (val={best_val:.6f})")
+        else:
+            patience_counter += 1
+            if patience_counter % 10 == 0:
+                log.info(f"No improvement ({patience_counter}/{patience})")
+            if patience_counter >= patience:
+                log.info("EARLY STOPPING triggered")
+                break
+
+    torch.save(model.state_dict(), os.path.join("checkpoints", "pose_model_final.pt"))
+    log.info(f"Training complete. Best val: {best_val:.6f}")
+    log.info("Training complete. Use export_onnx.py to convert to ONNX separately.")
+
+if __name__ == '__main__':
+    main()
