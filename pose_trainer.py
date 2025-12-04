@@ -21,7 +21,7 @@ from torchvision import transforms, models
 import torchvision.transforms.functional as F
 
 # ============== CONFIG ==============
-CSV_PATH = "dataset_csv/rotations_20251203_150653.csv"
+CSV_PATH = "dataset_csv/rotations_20251203_194918.csv"
 IMG_DIR = "dataset"
 BATCH_SIZE = 256            # Actual DataLoader batch
 EFFECTIVE_BATCH = 1024      # Desired effective batch
