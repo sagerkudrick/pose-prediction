@@ -243,7 +243,7 @@ criterion = CombinedQuaternionLoss(w_geo=0.7, w_mse=0.3)
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
 scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-    optimizer, T_0=40, T_mult=1.5, eta_min=1e-6
+    optimizer, T_0=40, T_mult=1, eta_min=1e-6
 )
 
 best_val = float("inf")
