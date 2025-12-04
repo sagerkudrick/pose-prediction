@@ -1,33 +1,32 @@
-# trainer_rewrite.py
+# trainer_accum_amp.py
 """
-Trainer for quaternion regression with proper logging and GPU monitoring.
-Expected CSV columns: x,y,z,w,filename
-Saves: pose_model_best.pt and pose_model_final.pt
+Trainer for quaternion regression with:
+- Gradient accumulation for large effective batch size
+- Mixed precision training (AMP) to save GPU memory
+- Same augmentation / quaternion perturbations
 """
-import os
-import random
-import logging
+import os, random, logging, subprocess
 import numpy as np
 import pandas as pd
 from PIL import Image
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 from torchvision import transforms, models
-from sklearn.model_selection import train_test_split
-import subprocess
 import torchvision.transforms.functional as F
 
 # ============== CONFIG ==============
 CSV_PATH = "dataset_csv/rotations_20251203_150653.csv"
 IMG_DIR = "dataset"
-BATCH_SIZE = 16
+BATCH_SIZE = 256  # actual DataLoader batch
+EFFECTIVE_BATCH = 1024  # desired effective batch
+ACCUM_STEPS = EFFECTIVE_BATCH // BATCH_SIZE
 NUM_EPOCHS = 350
-LR = 1e-4
+LR = 5e-4
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+SEED = 42
 USE_COSINE_QUAT_LOSS = True
 PRINT_EVERY_BATCH = 20
-SEED = 42
 os.makedirs("checkpoints", exist_ok=True)
 
 # deterministic
@@ -44,12 +43,10 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 log.info(f"Using device: {DEVICE}")
 
-# ============== GPU USAGE HELPER ==============
 def log_gpu_usage():
     if torch.cuda.is_available():
-        mem_alloc = torch.cuda.memory_allocated(DEVICE) / 1024**2
-        mem_reserved = torch.cuda.memory_reserved(DEVICE) / 1024**2
-        # optional: get GPU utilization via nvidia-smi
+        mem_alloc = torch.cuda.memory_allocated(DEVICE)/1024**2
+        mem_reserved = torch.cuda.memory_reserved(DEVICE)/1024**2
         try:
             result = subprocess.run(
                 ["nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
@@ -58,18 +55,14 @@ def log_gpu_usage():
             util = result.stdout.strip()
         except Exception:
             util = "N/A"
-        log.info(f"[GPU] Memory allocated: {mem_alloc:.1f} MiB, Memory reserved: {mem_reserved:.1f} MiB, Utilization: {util}%")
+        log.info(f"[GPU] Memory allocated: {mem_alloc:.1f} MiB, reserved: {mem_reserved:.1f} MiB, Util: {util}%")
 
 # ============== MODEL ==============
 class PoseModel(nn.Module):
     def __init__(self):
         super().__init__()
         backbone = models.resnet18(pretrained=True)
-        
-        # Replace adaptive avg pool with fixed 7x7 avg pool
         backbone.avgpool = nn.AvgPool2d(kernel_size=7, stride=1)
-        
-        # Replace fully connected layers
         backbone.fc = nn.Sequential(
             nn.Linear(backbone.fc.in_features, 512),
             nn.ReLU(),
@@ -80,173 +73,153 @@ class PoseModel(nn.Module):
             nn.Linear(256, 4)
         )
         self.backbone = backbone
-
     def forward(self, x):
         return self.backbone(x)
 
 # ============== LOSSES ==============
 class QuaternionCosineLoss(nn.Module):
     def forward(self, pred, target):
-        dot = torch.sum(pred * target, dim=1)
+        dot = torch.sum(pred*target, dim=1)
         return (1.0 - torch.abs(dot)).mean()
-
 class QuaternionMSELoss(nn.Module):
     def forward(self, pred, target):
         return nn.functional.mse_loss(pred, target)
 
 # ============== DATASET ==============
-class PoseDataset(torch.utils.data.Dataset):
-    def __init__(self, csv_file, image_dir, transform=None):
+class PoseDataset(Dataset):
+    def __init__(self, csv_file, image_dir, transform=None, augment_quat=True):
         self.df = pd.read_csv(csv_file)
         required = {"x","y","z","w","filename"}
         if not required.issubset(self.df.columns):
             raise ValueError(f"CSV missing columns, need: {required}")
         self.image_dir = image_dir
         self.transform = transform
+        self.augment_quat = augment_quat
 
     def __len__(self):
         return len(self.df)
 
+    def random_quat_perturb(self, q, max_angle_deg=5):
+        angle = np.radians(random.uniform(-max_angle_deg, max_angle_deg))
+        axis = np.random.randn(3)
+        axis /= np.linalg.norm(axis)
+        sin_a = np.sin(angle/2)
+        dq = np.array([axis[0]*sin_a, axis[1]*sin_a, axis[2]*sin_a, np.cos(angle/2)], dtype=np.float32)
+        x1, y1, z1, w1 = q.numpy()
+        x2, y2, z2, w2 = dq
+        q_new = np.array([
+            w1*x2 + x1*w2 + y1*z2 - z1*y2,
+            w1*y2 - x1*z2 + y1*w2 + z1*x2,
+            w1*z2 + x1*y2 - y1*x2 + z1*w2,
+            w1*w2 - x1*x2 - y1*y2 - z1*z2
+        ], dtype=np.float32)
+        q_new /= np.linalg.norm(q_new)
+        return torch.tensor(q_new, dtype=torch.float32)
+
     def __getitem__(self, idx):
         row = self.df.iloc[idx]
         q = torch.tensor([row["x"], row["y"], row["z"], row["w"]], dtype=torch.float32)
-        q = q / (torch.norm(q) + 1e-8)
+        q = q / (torch.norm(q)+1e-8)
+        if self.augment_quat:
+            q = self.random_quat_perturb(q)
+
         path = os.path.join(self.image_dir, row["filename"]).replace(".png",".jpg")
         if not os.path.exists(path):
-            basename = os.path.basename(row["filename"])
-            alt = os.path.join(self.image_dir, basename)
+            alt = os.path.join(self.image_dir, os.path.basename(row["filename"]))
             if os.path.exists(alt):
                 path = alt
             else:
                 raise FileNotFoundError(f"Image not found: {path}")
 
         img = Image.open(path).convert("RGBA")
-        if img.mode == "RGBA":
+        if img.mode=="RGBA":
             bg = Image.new("RGB", img.size, (255,255,255))
             bg.paste(img, mask=img.split()[3])
             img = bg
         else:
             img = img.convert("RGB")
-
         if self.transform:
             img = self.transform(img)
         return img, q
 
-class RandomGamma(object):
+class RandomGamma:
     def __init__(self, gamma_min=0.7, gamma_max=1.5):
         self.gamma_min = gamma_min
         self.gamma_max = gamma_max
-
     def __call__(self, img):
         gamma = random.uniform(self.gamma_min, self.gamma_max)
         return F.adjust_gamma(img, gamma)
 
-# class RandomDirectionalShading(object):
-#     def __init__(self, strength=0.4, probability=0.7):
-#         self.strength = strength
-#         self.probability = probability
-
-#     def __call__(self, img):
-#         if random.random() > self.probability:
-#             return img
-
-#         w, h = img.size
-#         angle = random.uniform(0, 2 * np.pi)
-#         dx, dy = np.cos(angle), np.sin(angle)
-
-#         # Build a gradient mask
-#         gradient = Image.new("L", (w, h))
-#         for y in range(h):
-#             for x in range(w):
-#                 # Project pixel onto light direction axis
-#                 v = (x * dx + y * dy) / (w + h)
-#                 v = 128 + v * 255 * self.strength
-#                 gradient.putpixel((x, y), int(np.clip(v, 0, 255)))
-
-#         gradient_rgb = gradient.convert("RGB")
-#         return Image.blend(img, gradient_rgb, 0.35)
-
-# ============== TRANSFORMS ==============
 train_transform = transforms.Compose([
-    transforms.Resize((224, 224)),
-
-    # --- photometric augmentation ---
-    transforms.ColorJitter(
-        brightness=0.6,
-        contrast=0.6,
-        saturation=0.4,
-        hue=0.06
-    ),
-
-    RandomGamma(0.7, 1.6),          # exposure changes
-    #RandomDirectionalShading(0.35), # directional lighting on the object ONLY
-
+    transforms.Resize((224,224)),
+    transforms.ColorJitter(0.6,0.6,0.4,0.06),
+    RandomGamma(0.7,1.6),
     transforms.ToTensor(),
-    transforms.Normalize(
-        mean=[0.485, 0.456, 0.406],
-        std=[0.229, 0.224, 0.225]
-    )
+    transforms.Normalize([0.485,0.456,0.406],[0.229,0.224,0.225])
 ])
-
 val_transform = transforms.Compose([
     transforms.Resize((224,224)),
     transforms.ToTensor(),
-    transforms.Normalize([0.5]*3, [0.5]*3)
+    transforms.Normalize([0.485,0.456,0.406],[0.229,0.224,0.225])
 ])
 
 # ============== LOAD DATA ==============
 df = pd.read_csv(CSV_PATH)
-indices = list(range(len(df)))
-train_idx, val_idx = train_test_split(indices, test_size=0.2, random_state=SEED)
+train_ds = PoseDataset(CSV_PATH, IMG_DIR, train_transform, augment_quat=True)
+val_ds = PoseDataset(CSV_PATH, IMG_DIR, val_transform, augment_quat=False)
 
-train_ds = Subset(PoseDataset(CSV_PATH, IMG_DIR, train_transform), train_idx)
-val_ds = Subset(PoseDataset(CSV_PATH, IMG_DIR, val_transform), val_idx)
+# WeightedRandomSampler (optional)
+weights = np.ones(len(train_ds))
+sampler = WeightedRandomSampler(weights, num_samples=len(train_ds), replacement=True)
 
-# adding num_worker
-train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=16, pin_memory=True)
-val_loader   = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True)
-log.info(f"Training samples: {len(train_ds)}, Validation samples: {len(val_ds)}")
+train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, sampler=sampler,
+                          num_workers=16, pin_memory=True)
+val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False,
+                        num_workers=4, pin_memory=True)
 
-# ============== SETUP ==============
+# ============== SETUP MODEL ==============
 model = PoseModel().to(DEVICE)
 criterion = QuaternionCosineLoss() if USE_COSINE_QUAT_LOSS else QuaternionMSELoss()
-optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=1e-4)
-#scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=5)
-#scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=NUM_EPOCHS)
-
-optimizer = torch.optim.AdamW(model.parameters(), lr=5e-4, weight_decay=1e-4)
+optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=50, eta_min=1e-6)
-
-# Use ReduceLROnPlateau for validation-based adaptation
 plateau_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
     optimizer, factor=0.5, patience=10, min_lr=1e-6, verbose=True
 )
 
+scaler = torch.cuda.amp.GradScaler()  # AMP
 best_val = float("inf")
 patience = 40
 patience_counter = 0
 
-log.info(f"Starting training for {NUM_EPOCHS} epochs...")
-
 # ============== TRAIN LOOP ==============
+log.info(f"Starting training for {NUM_EPOCHS} epochs...")
 for epoch in range(1, NUM_EPOCHS+1):
     model.train()
     running = 0.0
+    optimizer.zero_grad()
+
     for i, (imgs, targets) in enumerate(train_loader):
         imgs, targets = imgs.to(DEVICE), targets.to(DEVICE)
-        optimizer.zero_grad()
-        preds = model(imgs)
-        preds = preds / (torch.norm(preds, dim=1, keepdim=True) + 1e-8)
-        loss = criterion(preds, targets)
-        loss.backward()
-        optimizer.step()
-        running += loss.item()
-        
+
+        with torch.cuda.amp.autocast():
+            preds = model(imgs)
+            preds = preds / (torch.norm(preds, dim=1, keepdim=True)+1e-8)
+            loss = criterion(preds, targets)
+            loss = loss / ACCUM_STEPS  # scale loss for accumulation
+
+        scaler.scale(loss).backward()
+        running += loss.item() * ACCUM_STEPS  # unscale for logging
+
+        if (i+1) % ACCUM_STEPS == 0:
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad()
+
         if i % PRINT_EVERY_BATCH == 0:
-            log.info(f"[Epoch {epoch}] Batch {i}/{len(train_loader)} loss={loss.item():.4f}")
+            log.info(f"[Epoch {epoch}] Batch {i}/{len(train_loader)} loss={loss.item()*ACCUM_STEPS:.4f}")
             log_gpu_usage()
 
-    avg_train = running / max(1, len(train_loader))
+    avg_train = running / max(1,len(train_loader))
 
     # Validation
     model.eval()
@@ -254,19 +227,20 @@ for epoch in range(1, NUM_EPOCHS+1):
     with torch.no_grad():
         for imgs, targets in val_loader:
             imgs, targets = imgs.to(DEVICE), targets.to(DEVICE)
-            preds = model(imgs)
-            preds = preds / (torch.norm(preds, dim=1, keepdim=True) + 1e-8)
-            vloss += criterion(preds, targets).item()
-    avg_val = vloss / max(1, len(val_loader))
+            with torch.cuda.amp.autocast():
+                preds = model(imgs)
+                preds = preds / (torch.norm(preds, dim=1, keepdim=True)+1e-8)
+                vloss += criterion(preds, targets).item()
+    avg_val = vloss / max(1,len(val_loader))
     scheduler.step(avg_val)
 
-    log.info(f"Epoch {epoch} summary -> train={avg_train:.4f} val={avg_val:.4f} lr={optimizer.param_groups[0]['lr']:.2e}")
+    log.info(f"Epoch {epoch} -> train={avg_train:.4f} val={avg_val:.4f} lr={optimizer.param_groups[0]['lr']:.2e}")
     log_gpu_usage()
 
     if avg_val < best_val:
         best_val = avg_val
         patience_counter = 0
-        torch.save(model.state_dict(), os.path.join("checkpoints", "pose_model_best.pt"))
+        torch.save(model.state_dict(), os.path.join("checkpoints","pose_model_best.pt"))
         log.info("Saved NEW BEST model")
     else:
         patience_counter += 1
@@ -275,5 +249,5 @@ for epoch in range(1, NUM_EPOCHS+1):
             log.info("EARLY STOPPING")
             break
 
-torch.save(model.state_dict(), os.path.join("checkpoints", "pose_model_final.pt"))
+torch.save(model.state_dict(), os.path.join("checkpoints","pose_model_final.pt"))
 log.info(f"Training complete. Best val: {best_val}")

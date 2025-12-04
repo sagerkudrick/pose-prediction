@@ -8,19 +8,17 @@ class PoseModel(nn.Module):
         super().__init__()
         backbone = models.resnet18(pretrained=True)
         
-        # Replace adaptive avg pool with fixed 7x7 avg pool (ONNX compatible)
+        # Replace adaptive avg pool with fixed 7x7 avg pool
         backbone.avgpool = nn.AvgPool2d(kernel_size=7, stride=1)
         
-        # Replace fully connected layers with ONNX-safe architecture
+        # Replace fully connected layers
         backbone.fc = nn.Sequential(
             nn.Linear(backbone.fc.in_features, 512),
-            nn.BatchNorm1d(512),
-            nn.ReLU(),
-            nn.Dropout(0.4),
-            nn.Linear(512, 256),
-            nn.BatchNorm1d(256),
             nn.ReLU(),
             nn.Dropout(0.3),
+            nn.Linear(512, 256),
+            nn.ReLU(),
+            nn.Dropout(0.2),
             nn.Linear(256, 4)
         )
         self.backbone = backbone
