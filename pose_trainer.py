@@ -1,11 +1,16 @@
-# trainer_accum_amp.py
+# trainer_windows_safe.py
 """
-Trainer for quaternion regression with:
+Windows-safe trainer for quaternion regression with:
 - Gradient accumulation for large effective batch size
-- Mixed precision training (AMP) to save GPU memory
-- Same augmentation / quaternion perturbations
+- Mixed precision training (AMP)
+- Proper __main__ guard
+- GPU usage logging
 """
-import os, random, logging, subprocess
+
+import os
+import random
+import logging
+import subprocess
 import numpy as np
 import pandas as pd
 from PIL import Image
@@ -18,8 +23,8 @@ import torchvision.transforms.functional as F
 # ============== CONFIG ==============
 CSV_PATH = "dataset_csv/rotations_20251203_150653.csv"
 IMG_DIR = "dataset"
-BATCH_SIZE = 256  # actual DataLoader batch
-EFFECTIVE_BATCH = 1024  # desired effective batch
+BATCH_SIZE = 256            # Actual DataLoader batch
+EFFECTIVE_BATCH = 1024      # Desired effective batch
 ACCUM_STEPS = EFFECTIVE_BATCH // BATCH_SIZE
 NUM_EPOCHS = 350
 LR = 5e-4
@@ -73,6 +78,7 @@ class PoseModel(nn.Module):
             nn.Linear(256, 4)
         )
         self.backbone = backbone
+
     def forward(self, x):
         return self.backbone(x)
 
@@ -81,6 +87,7 @@ class QuaternionCosineLoss(nn.Module):
     def forward(self, pred, target):
         dot = torch.sum(pred*target, dim=1)
         return (1.0 - torch.abs(dot)).mean()
+
 class QuaternionMSELoss(nn.Module):
     def forward(self, pred, target):
         return nn.functional.mse_loss(pred, target)
@@ -157,97 +164,105 @@ train_transform = transforms.Compose([
     transforms.ToTensor(),
     transforms.Normalize([0.485,0.456,0.406],[0.229,0.224,0.225])
 ])
+
 val_transform = transforms.Compose([
     transforms.Resize((224,224)),
     transforms.ToTensor(),
     transforms.Normalize([0.485,0.456,0.406],[0.229,0.224,0.225])
 ])
 
-# ============== LOAD DATA ==============
-df = pd.read_csv(CSV_PATH)
-train_ds = PoseDataset(CSV_PATH, IMG_DIR, train_transform, augment_quat=True)
-val_ds = PoseDataset(CSV_PATH, IMG_DIR, val_transform, augment_quat=False)
+# ============== TRAIN FUNCTION ==============
+def train():
+    # Load datasets
+    train_ds = PoseDataset(CSV_PATH, IMG_DIR, train_transform, augment_quat=True)
+    val_ds = PoseDataset(CSV_PATH, IMG_DIR, val_transform, augment_quat=False)
 
-# WeightedRandomSampler (optional)
-weights = np.ones(len(train_ds))
-sampler = WeightedRandomSampler(weights, num_samples=len(train_ds), replacement=True)
+    # Optional sampler
+    weights = np.ones(len(train_ds))
+    sampler = WeightedRandomSampler(weights, num_samples=len(train_ds), replacement=True)
 
-train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, sampler=sampler,
-                          num_workers=16, pin_memory=True)
-val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False,
-                        num_workers=4, pin_memory=True)
+    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, sampler=sampler,
+                              num_workers=8, pin_memory=True)
+    val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False,
+                            num_workers=4, pin_memory=True)
 
-# ============== SETUP MODEL ==============
-model = PoseModel().to(DEVICE)
-criterion = QuaternionCosineLoss() if USE_COSINE_QUAT_LOSS else QuaternionMSELoss()
-optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
-scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=50, eta_min=1e-6)
-plateau_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-    optimizer, factor=0.5, patience=10, min_lr=1e-6, verbose=True
-)
+    model = PoseModel().to(DEVICE)
+    criterion = QuaternionCosineLoss() if USE_COSINE_QUAT_LOSS else QuaternionMSELoss()
+    optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=50, eta_min=1e-6)
+    plateau_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, factor=0.5, patience=10, min_lr=1e-6
+    )
 
-scaler = torch.cuda.amp.GradScaler()  # AMP
-best_val = float("inf")
-patience = 40
-patience_counter = 0
+    scaler = torch.cuda.amp.GradScaler()
+    best_val = float("inf")
+    patience = 40
+    patience_counter = 0
 
-# ============== TRAIN LOOP ==============
-log.info(f"Starting training for {NUM_EPOCHS} epochs...")
-for epoch in range(1, NUM_EPOCHS+1):
-    model.train()
-    running = 0.0
-    optimizer.zero_grad()
+    log.info(f"Starting training for {NUM_EPOCHS} epochs...")
 
-    for i, (imgs, targets) in enumerate(train_loader):
-        imgs, targets = imgs.to(DEVICE), targets.to(DEVICE)
+    for epoch in range(1, NUM_EPOCHS+1):
+        model.train()
+        running = 0.0
+        optimizer.zero_grad()
 
-        with torch.cuda.amp.autocast():
-            preds = model(imgs)
-            preds = preds / (torch.norm(preds, dim=1, keepdim=True)+1e-8)
-            loss = criterion(preds, targets)
-            loss = loss / ACCUM_STEPS  # scale loss for accumulation
-
-        scaler.scale(loss).backward()
-        running += loss.item() * ACCUM_STEPS  # unscale for logging
-
-        if (i+1) % ACCUM_STEPS == 0:
-            scaler.step(optimizer)
-            scaler.update()
-            optimizer.zero_grad()
-
-        if i % PRINT_EVERY_BATCH == 0:
-            log.info(f"[Epoch {epoch}] Batch {i}/{len(train_loader)} loss={loss.item()*ACCUM_STEPS:.4f}")
-            log_gpu_usage()
-
-    avg_train = running / max(1,len(train_loader))
-
-    # Validation
-    model.eval()
-    vloss = 0.0
-    with torch.no_grad():
-        for imgs, targets in val_loader:
+        for i, (imgs, targets) in enumerate(train_loader):
             imgs, targets = imgs.to(DEVICE), targets.to(DEVICE)
+
             with torch.cuda.amp.autocast():
                 preds = model(imgs)
                 preds = preds / (torch.norm(preds, dim=1, keepdim=True)+1e-8)
-                vloss += criterion(preds, targets).item()
-    avg_val = vloss / max(1,len(val_loader))
-    scheduler.step(avg_val)
+                loss = criterion(preds, targets)
+                loss = loss / ACCUM_STEPS
 
-    log.info(f"Epoch {epoch} -> train={avg_train:.4f} val={avg_val:.4f} lr={optimizer.param_groups[0]['lr']:.2e}")
-    log_gpu_usage()
+            scaler.scale(loss).backward()
+            running += loss.item() * ACCUM_STEPS
 
-    if avg_val < best_val:
-        best_val = avg_val
-        patience_counter = 0
-        torch.save(model.state_dict(), os.path.join("checkpoints","pose_model_best.pt"))
-        log.info("Saved NEW BEST model")
-    else:
-        patience_counter += 1
-        log.info(f"No improvement ({patience_counter}/{patience})")
-        if patience_counter >= patience:
-            log.info("EARLY STOPPING")
-            break
+            if (i+1) % ACCUM_STEPS == 0:
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad()
 
-torch.save(model.state_dict(), os.path.join("checkpoints","pose_model_final.pt"))
-log.info(f"Training complete. Best val: {best_val}")
+            if i % PRINT_EVERY_BATCH == 0:
+                log.info(f"[Epoch {epoch}] Batch {i}/{len(train_loader)} loss={loss.item()*ACCUM_STEPS:.4f}")
+                log_gpu_usage()
+
+        avg_train = running / max(1, len(train_loader))
+
+        # Validation
+        model.eval()
+        vloss = 0.0
+        with torch.no_grad():
+            for imgs, targets in val_loader:
+                imgs, targets = imgs.to(DEVICE), targets.to(DEVICE)
+                with torch.cuda.amp.autocast():
+                    preds = model(imgs)
+                    preds = preds / (torch.norm(preds, dim=1, keepdim=True)+1e-8)
+                    vloss += criterion(preds, targets).item()
+        avg_val = vloss / max(1, len(val_loader))
+        scheduler.step(avg_val)
+
+        log.info(f"Epoch {epoch} -> train={avg_train:.4f} val={avg_val:.4f} lr={optimizer.param_groups[0]['lr']:.2e}")
+        log_gpu_usage()
+
+        if avg_val < best_val:
+            best_val = avg_val
+            patience_counter = 0
+            torch.save(model.state_dict(), os.path.join("checkpoints","pose_model_best.pt"))
+            log.info("Saved NEW BEST model")
+        else:
+            patience_counter += 1
+            log.info(f"No improvement ({patience_counter}/{patience})")
+            if patience_counter >= patience:
+                log.info("EARLY STOPPING")
+                break
+
+    torch.save(model.state_dict(), os.path.join("checkpoints","pose_model_final.pt"))
+    log.info(f"Training complete. Best val: {best_val}")
+
+
+# ============== ENTRY POINT ==============
+if __name__ == "__main__":
+    from multiprocessing import freeze_support
+    freeze_support()  # Windows-safe
+    train()
