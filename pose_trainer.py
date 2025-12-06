@@ -170,8 +170,7 @@ class PoseDataset(Dataset):
         row = self.df.iloc[idx]
         q = torch.tensor([row["x"], row["y"], row["z"], row["w"]], dtype=torch.float32)
         q = q / (torch.norm(q)+1e-8)
-        if self.augment_quat:
-            q = self.random_quat_perturb(q)
+
 
         path = os.path.join(self.image_dir, row["filename"]).replace(".png",".jpg")
         if not os.path.exists(path):
@@ -220,8 +219,8 @@ def train():
     download_and_extract_dataset()
 
     # Dataset loaders
-    train_ds = PoseDataset(CSV_PATH, IMG_DIR, train_transform, augment_quat=True)
-    val_ds = PoseDataset(CSV_PATH, IMG_DIR, val_transform, augment_quat=False)
+    train_ds = PoseDataset(CSV_PATH, IMG_DIR, train_transform)
+    val_ds = PoseDataset(CSV_PATH, IMG_DIR, val_transform)
 
     sampler = WeightedRandomSampler(np.ones(len(train_ds)), num_samples=len(train_ds), replacement=True)
 
