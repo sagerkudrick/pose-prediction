@@ -6,7 +6,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 WORKDIR /workspace
 
 # Tell Python to use the mounted venv
-ENV VIRTUAL_ENV=/app/.venv
+ENV VIRTUAL_ENV=/workspace/.venv
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
 # Just copy your code
