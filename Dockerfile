@@ -8,6 +8,15 @@ ENV DEBIAN_FRONTEND=noninteractive
 WORKDIR /workspace
 
 # -----------------------
+# Create persistent virtual environment directory (mounted from host)
+# -----------------------
+ENV VIRTUAL_ENV=/app/.venv
+ENV PATH="$VIRTUAL_ENV/bin:$PATH"
+
+# Ensure folder exists even before mount
+RUN mkdir -p /app/.venv
+
+# -----------------------
 # Install system packages with cache
 # -----------------------
 RUN --mount=type=cache,target=/var/cache/apt \
@@ -17,19 +26,21 @@ RUN --mount=type=cache,target=/var/cache/apt \
     && rm -rf /var/lib/apt/lists/*
 
 # -----------------------
-# Upgrade pip
+# Create venv & upgrade pip
 # -----------------------
-RUN python3 -m pip install --upgrade pip
+RUN python3 -m venv /app/.venv && \
+    /app/.venv/bin/pip install --upgrade pip setuptools wheel
 
 # -----------------------
-# Install PyTorch with BuildKit pip cache
+# Install PyTorch inside the venv
 # -----------------------
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install torch==2.1.2+cu118 torchvision==0.16.2+cu118 torchaudio==2.1.2 \
-    --extra-index-url https://download.pytorch.org/whl/cu118
+    /app/.venv/bin/pip install \
+        torch==2.1.2+cu118 torchvision==0.16.2+cu118 torchaudio==2.1.2 \
+        --extra-index-url https://download.pytorch.org/whl/cu118
 
 # -----------------------
-# Pre-download ResNet18 weights (cached by BuildKit)
+# Pre-download ResNet18 weights (cached)
 # -----------------------
 RUN --mount=type=cache,target=/root/.cache/torch \
     mkdir -p /root/.cache/torch/hub/checkpoints && \
@@ -37,11 +48,11 @@ RUN --mount=type=cache,target=/root/.cache/torch \
     -O /root/.cache/torch/hub/checkpoints/resnet18-f37072fd.pth
 
 # -----------------------
-# Install remaining Python dependencies
+# Install project dependencies inside the venv
 # -----------------------
 COPY requirements.txt .
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -r requirements.txt
+    /app/.venv/bin/pip install -r requirements.txt
 
 # -----------------------
 # Copy source code
@@ -49,6 +60,6 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 COPY . .
 
 # -----------------------
-# Run
+# Default run command
 # -----------------------
-CMD ["python3", "pose_trainer.py"]
+CMD ["/app/.venv/bin/python", "pose_trainer.py"]
