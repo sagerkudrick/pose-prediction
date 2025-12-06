@@ -1,6 +1,6 @@
-# trainer_windows_safe_efficientnet.py
+# trainer_windows_safe.py
 """
-Windows-safe trainer for quaternion regression with EfficientNet-Lite0:
+Windows-safe trainer for quaternion regression with:
 - Gradient accumulation for large effective batch size
 - Mixed precision training (AMP)
 - Proper __main__ guard
@@ -17,15 +17,14 @@ from PIL import Image
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
-from torchvision import transforms
+from torchvision import transforms, models
 import torchvision.transforms.functional as F
-import timm  # For EfficientNet-Lite
 
 # ============== CONFIG ==============
 CSV_PATH = "dataset_csv/rotations_20251203_194918.csv"
 IMG_DIR = "dataset"
 BATCH_SIZE = 64
-EFFECTIVE_BATCH = 352
+EFFECTIVE_BATCH = 352   
 ACCUM_STEPS = EFFECTIVE_BATCH // BATCH_SIZE
 NUM_EPOCHS = 350
 LR = 5e-4
@@ -64,34 +63,81 @@ def log_gpu_usage():
         log.info(f"[GPU] Memory allocated: {mem_alloc:.1f} MiB, reserved: {mem_reserved:.1f} MiB, Util: {util}%")
 
 # ============== MODEL ==============
-class PoseModelEfficientNet(nn.Module):
+class HardSwishManual(nn.Module):
+    def forward(self, x):
+        # hswish(x) = x * relu6(x + 3) / 6
+        return x * nn.functional.relu6(x + 3) / 6
+
+
+class HardSigmoidManual(nn.Module):
+    def forward(self, x):
+        # hsigmoid(x) = relu6(x + 3) / 6
+        return nn.functional.relu6(x + 3) / 6
+
+
+# -------------------------------------------------------
+# Module replacer
+# -------------------------------------------------------
+
+def replace_hard_ops(module):
+    """
+    Recursively replace Hardswish → HardSwishManual
+    and Hardsigmoid → HardSigmoidManual
+    """
+    for name, child in module.named_children():
+
+        # Replace Hardswish
+        if isinstance(child, nn.Hardswish):
+            module.add_module(name, HardSwishManual())
+
+        # Replace Hardsigmoid
+        elif isinstance(child, nn.Hardsigmoid):
+            module.add_module(name, HardSigmoidManual())
+
+        # Recurse
+        else:
+            replace_hard_ops(child)
+
+
+# -------------------------------------------------------
+# Pose Model
+# -------------------------------------------------------
+
+class PoseModel(nn.Module):
     def __init__(self):
         super().__init__()
-        # EfficientNet-Lite0 backbone (pretrained)
-        self.backbone = timm.create_model('efficientnet_lite0', pretrained=True)
-        in_features = self.backbone.classifier.in_features
 
-        # Replace classifier with quaternion regression head
-        self.backbone.classifier = nn.Sequential(
-            nn.Linear(in_features, 512),
-            nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(512, 256),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(256, 4),  # quaternion output
+        backbone = models.mobilenet_v3_large(
+            weights=models.MobileNet_V3_Large_Weights.DEFAULT
         )
 
+        # Replace all hard ops in backbone
+        replace_hard_ops(backbone)
+
+        # Replace classifier head
+        in_features = backbone.classifier[0].in_features
+
+        backbone.classifier = nn.Sequential(
+            nn.Linear(in_features, 512),
+            HardSwishManual(),
+            nn.Dropout(0.2),
+
+            nn.Linear(512, 256),
+            HardSwishManual(),
+            nn.Dropout(0.1),
+
+            nn.Linear(256, 4),
+        )
+
+        self.backbone = backbone
+
     def forward(self, x):
-        x = self.backbone(x)
-        # Normalize quaternion to unit length
-        x = x / (torch.norm(x, dim=1, keepdim=True) + 1e-8)
-        return x
+        return self.backbone(x)
 
 # ============== LOSSES ==============
 class QuaternionCosineLoss(nn.Module):
     def forward(self, pred, target):
-        dot = torch.sum(pred * target, dim=1)
+        dot = torch.sum(pred*target, dim=1)
         return (1.0 - torch.abs(dot)).mean()
 
 class QuaternionMSELoss(nn.Module):
@@ -179,9 +225,11 @@ val_transform = transforms.Compose([
 
 # ============== TRAIN FUNCTION ==============
 def train():
+    # Load datasets
     train_ds = PoseDataset(CSV_PATH, IMG_DIR, train_transform, augment_quat=True)
     val_ds = PoseDataset(CSV_PATH, IMG_DIR, val_transform, augment_quat=False)
 
+    # Optional sampler
     weights = np.ones(len(train_ds))
     sampler = WeightedRandomSampler(weights, num_samples=len(train_ds), replacement=True)
 
@@ -190,7 +238,7 @@ def train():
     val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False,
                             num_workers=4, pin_memory=True)
 
-    model = PoseModelEfficientNet().to(DEVICE)
+    model = PoseModel().to(DEVICE)
     criterion = QuaternionCosineLoss() if USE_COSINE_QUAT_LOSS else QuaternionMSELoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=50, eta_min=1e-6)
@@ -215,6 +263,7 @@ def train():
 
             with torch.cuda.amp.autocast():
                 preds = model(imgs)
+                preds = preds / (torch.norm(preds, dim=1, keepdim=True)+1e-8)
                 loss = criterion(preds, targets)
                 loss = loss / ACCUM_STEPS
 
@@ -240,6 +289,7 @@ def train():
                 imgs, targets = imgs.to(DEVICE), targets.to(DEVICE)
                 with torch.cuda.amp.autocast():
                     preds = model(imgs)
+                    preds = preds / (torch.norm(preds, dim=1, keepdim=True)+1e-8)
                     vloss += criterion(preds, targets).item()
         avg_val = vloss / max(1, len(val_loader))
         scheduler.step(avg_val)
@@ -261,6 +311,7 @@ def train():
 
     torch.save(model.state_dict(), os.path.join("checkpoints","pose_model_final.pt"))
     log.info(f"Training complete. Best val: {best_val}")
+
 
 # ============== ENTRY POINT ==============
 if __name__ == "__main__":
