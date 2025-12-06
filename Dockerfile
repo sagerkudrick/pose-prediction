@@ -1,5 +1,4 @@
 # syntax=docker/dockerfile:1.4
-# CUDA 11.8 (supports A5000 sm_86)
 FROM nvidia/cuda:11.8.0-runtime-ubuntu22.04
 
 ENV PYTHONUNBUFFERED=1
@@ -31,13 +30,13 @@ RUN python3 -m venv $VIRTUAL_ENV && \
 COPY requirements.txt .
 
 # -----------------------
-# Install dependencies (cached unless requirements.txt changes)
+# Install dependencies
 # -----------------------
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r requirements.txt
 
 # -----------------------
-# Copy the rest of the source code
+# Copy source code only (no dataset/models)
 # -----------------------
 COPY . .
 

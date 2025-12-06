@@ -1,45 +1,59 @@
-# trainer_windows_safe.py
+# trainer_coolify_safe.py
 """
-Windows-safe trainer for quaternion regression with:
-- Gradient accumulation for large effective batch size
+Coolify-safe trainer for quaternion regression:
+- Downloads dataset/CSV if missing
+- Saves checkpoints to persistent volume
+- Exports ONNX model to persistent volume
+- Gradient accumulation for large batch
 - Mixed precision training (AMP)
-- Proper __main__ guard
-- GPU usage logging
+- Windows-safe multiprocessing
 """
 
 import os
 import random
 import logging
 import subprocess
+import zipfile
+import requests
 import numpy as np
 import pandas as pd
 from PIL import Image
+
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 from torchvision import transforms, models
 import torchvision.transforms.functional as F
 
-# ============== CONFIG ==============
-CSV_PATH = "dataset_csv/rotations_20251203_194918.csv"
-IMG_DIR = "dataset"
+# ================= CONFIG =================
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+SEED = 42
 BATCH_SIZE = 64
-EFFECTIVE_BATCH = 352   
+EFFECTIVE_BATCH = 352
 ACCUM_STEPS = EFFECTIVE_BATCH // BATCH_SIZE
 NUM_EPOCHS = 350
 LR = 5e-4
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-SEED = 42
 USE_COSINE_QUAT_LOSS = True
 PRINT_EVERY_BATCH = 20
-os.makedirs("checkpoints", exist_ok=True)
 
-# deterministic
+# Persistent paths
+IMG_DIR = "/dataset"
+CSV_DIR = "/dataset_csv"
+CSV_PATH = os.path.join(CSV_DIR, "rotations.csv")
+CHECKPOINT_DIR = "/workspace/checkpoints"
+MODEL_DIR = "/models"
+os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+os.makedirs(MODEL_DIR, exist_ok=True)
+
+# Hugging Face dataset zip
+DATASET_ZIP_URL = "https://huggingface.co/datasets/SagerKudrick/EngineRotations/blob/main/dataset.rar"
+DATASET_CSV = "https://huggingface.co/datasets/SagerKudrick/EngineRotations/blob/main/rotations.csv"
+# ================= SEED =================
 random.seed(SEED)
 np.random.seed(SEED)
 torch.manual_seed(SEED)
 
-# ============== LOGGING ==============
+# ================= LOGGING =================
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
@@ -62,79 +76,73 @@ def log_gpu_usage():
             util = "N/A"
         log.info(f"[GPU] Memory allocated: {mem_alloc:.1f} MiB, reserved: {mem_reserved:.1f} MiB, Util: {util}%")
 
-# ============== MODEL ==============
+# ================= DATASET DOWNLOAD =================
+def download_and_extract_dataset():
+    if not os.listdir(IMG_DIR):
+        os.makedirs(IMG_DIR, exist_ok=True)
+        zip_path = os.path.join(IMG_DIR, "dataset.zip")
+        log.info("Dataset not found, downloading from Hugging Face...")
+        with requests.get(DATASET_ZIP_URL, stream=True) as r:
+            r.raise_for_status()
+            with open(zip_path, "wb") as f:
+                for chunk in r.iter_content(1024*1024):
+                    f.write(chunk)
+        log.info("Unzipping dataset...")
+        with zipfile.ZipFile(zip_path, "r") as zip_ref:
+            zip_ref.extractall(IMG_DIR)
+        os.remove(zip_path)
+        log.info("Dataset ready.")
+
+        # Ensure CSV exists
+    if not os.path.exists(CSV_PATH):
+        print("Downloading CSV...")
+        with requests.get(DATASET_CSV, stream=True) as r:
+            r.raise_for_status()
+            with open(CSV_PATH, "wb") as f:
+                for chunk in r.iter_content(1024*1024):
+                    f.write(chunk)
+        print("CSV ready.")
+# ================= CUSTOM LAYERS =================
 class HardSwishManual(nn.Module):
     def forward(self, x):
-        # hswish(x) = x * relu6(x + 3) / 6
         return x * nn.functional.relu6(x + 3) / 6
-
 
 class HardSigmoidManual(nn.Module):
     def forward(self, x):
-        # hsigmoid(x) = relu6(x + 3) / 6
         return nn.functional.relu6(x + 3) / 6
 
-
-# -------------------------------------------------------
-# Module replacer
-# -------------------------------------------------------
-
 def replace_hard_ops(module):
-    """
-    Recursively replace Hardswish → HardSwishManual
-    and Hardsigmoid → HardSigmoidManual
-    """
     for name, child in module.named_children():
-
-        # Replace Hardswish
         if isinstance(child, nn.Hardswish):
             module.add_module(name, HardSwishManual())
-
-        # Replace Hardsigmoid
         elif isinstance(child, nn.Hardsigmoid):
             module.add_module(name, HardSigmoidManual())
-
-        # Recurse
         else:
             replace_hard_ops(child)
 
-
-# -------------------------------------------------------
-# Pose Model
-# -------------------------------------------------------
-
+# ================= MODEL =================
 class PoseModel(nn.Module):
     def __init__(self):
         super().__init__()
-
-        backbone = models.mobilenet_v3_large(
-            weights=models.MobileNet_V3_Large_Weights.DEFAULT
-        )
-
-        # Replace all hard ops in backbone
+        backbone = models.mobilenet_v3_large(weights=models.MobileNet_V3_Large_Weights.DEFAULT)
         replace_hard_ops(backbone)
 
-        # Replace classifier head
         in_features = backbone.classifier[0].in_features
-
         backbone.classifier = nn.Sequential(
             nn.Linear(in_features, 512),
             HardSwishManual(),
             nn.Dropout(0.2),
-
             nn.Linear(512, 256),
             HardSwishManual(),
             nn.Dropout(0.1),
-
             nn.Linear(256, 4),
         )
-
         self.backbone = backbone
 
     def forward(self, x):
         return self.backbone(x)
 
-# ============== LOSSES ==============
+# ================= LOSSES =================
 class QuaternionCosineLoss(nn.Module):
     def forward(self, pred, target):
         dot = torch.sum(pred*target, dim=1)
@@ -144,7 +152,7 @@ class QuaternionMSELoss(nn.Module):
     def forward(self, pred, target):
         return nn.functional.mse_loss(pred, target)
 
-# ============== DATASET ==============
+# ================= DATASET CLASS =================
 class PoseDataset(Dataset):
     def __init__(self, csv_file, image_dir, transform=None, augment_quat=True):
         self.df = pd.read_csv(csv_file)
@@ -157,23 +165,6 @@ class PoseDataset(Dataset):
 
     def __len__(self):
         return len(self.df)
-
-    def random_quat_perturb(self, q, max_angle_deg=5):
-        angle = np.radians(random.uniform(-max_angle_deg, max_angle_deg))
-        axis = np.random.randn(3)
-        axis /= np.linalg.norm(axis)
-        sin_a = np.sin(angle/2)
-        dq = np.array([axis[0]*sin_a, axis[1]*sin_a, axis[2]*sin_a, np.cos(angle/2)], dtype=np.float32)
-        x1, y1, z1, w1 = q.numpy()
-        x2, y2, z2, w2 = dq
-        q_new = np.array([
-            w1*x2 + x1*w2 + y1*z2 - z1*y2,
-            w1*y2 - x1*z2 + y1*w2 + z1*x2,
-            w1*z2 + x1*y2 - y1*x2 + z1*w2,
-            w1*w2 - x1*x2 - y1*y2 - z1*z2
-        ], dtype=np.float32)
-        q_new /= np.linalg.norm(q_new)
-        return torch.tensor(q_new, dtype=torch.float32)
 
     def __getitem__(self, idx):
         row = self.df.iloc[idx]
@@ -201,6 +192,7 @@ class PoseDataset(Dataset):
             img = self.transform(img)
         return img, q
 
+# ================= TRANSFORMS =================
 class RandomGamma:
     def __init__(self, gamma_min=0.7, gamma_max=1.5):
         self.gamma_min = gamma_min
@@ -223,15 +215,15 @@ val_transform = transforms.Compose([
     transforms.Normalize([0.485,0.456,0.406],[0.229,0.224,0.225])
 ])
 
-# ============== TRAIN FUNCTION ==============
+# ================= TRAINING =================
 def train():
-    # Load datasets
+    download_and_extract_dataset()
+
+    # Dataset loaders
     train_ds = PoseDataset(CSV_PATH, IMG_DIR, train_transform, augment_quat=True)
     val_ds = PoseDataset(CSV_PATH, IMG_DIR, val_transform, augment_quat=False)
 
-    # Optional sampler
-    weights = np.ones(len(train_ds))
-    sampler = WeightedRandomSampler(weights, num_samples=len(train_ds), replacement=True)
+    sampler = WeightedRandomSampler(np.ones(len(train_ds)), num_samples=len(train_ds), replacement=True)
 
     train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, sampler=sampler,
                               num_workers=8, pin_memory=True)
@@ -242,9 +234,6 @@ def train():
     criterion = QuaternionCosineLoss() if USE_COSINE_QUAT_LOSS else QuaternionMSELoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=50, eta_min=1e-6)
-    plateau_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, factor=0.5, patience=10, min_lr=1e-6
-    )
 
     scaler = torch.cuda.amp.GradScaler()
     best_val = float("inf")
@@ -300,7 +289,7 @@ def train():
         if avg_val < best_val:
             best_val = avg_val
             patience_counter = 0
-            torch.save(model.state_dict(), os.path.join("checkpoints","pose_model_best.pt"))
+            torch.save(model.state_dict(), os.path.join(CHECKPOINT_DIR,"pose_model_best.pt"))
             log.info("Saved NEW BEST model")
         else:
             patience_counter += 1
@@ -309,11 +298,24 @@ def train():
                 log.info("EARLY STOPPING")
                 break
 
-    torch.save(model.state_dict(), os.path.join("checkpoints","pose_model_final.pt"))
+    # Save final checkpoint
+    torch.save(model.state_dict(), os.path.join(CHECKPOINT_DIR,"pose_model_final.pt"))
     log.info(f"Training complete. Best val: {best_val}")
 
+    # Export ONNX
+    dummy_input = torch.randn(1,3,224,224).to(DEVICE)
+    model.eval()
+    onnx_path = os.path.join(MODEL_DIR, "pose_model.onnx")
+    torch.onnx.export(
+        model, dummy_input, onnx_path,
+        do_constant_folding=True,
+        input_names=['input'],
+        output_names=['output'],
+        dynamic_axes={'input': {0: 'batch'}, 'output': {0: 'batch'}}
+    )
+    log.info(f"ONNX model exported to {onnx_path}")
 
-# ============== ENTRY POINT ==============
+# ================= ENTRY POINT =================
 if __name__ == "__main__":
     from multiprocessing import freeze_support
     freeze_support()  # Windows-safe
