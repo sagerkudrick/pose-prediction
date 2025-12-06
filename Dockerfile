@@ -9,12 +9,13 @@ WORKDIR /workspace
 # -----------------------
 # Install system packages
 # -----------------------
-RUN --mount=type=cache,target=/var/cache/apt \
-    apt-get update && apt-get install -y \
-        python3 python3-pip python3.12-venv python3-dev \
-        git wget build-essential \
+RUN apt-get update && apt-get install -y \
+    python3 python3-pip python3-venv python3-dev \
+    git wget build-essential \
     && rm -rf /var/lib/apt/lists/*
 
+
+    
 # -----------------------
 # Create virtual environment
 # -----------------------
