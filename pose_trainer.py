@@ -325,10 +325,8 @@ def train():
                     preds = model(imgs)
                     preds = preds / (torch.norm(preds, dim=1, keepdim=True) + 1e-8)
                     
-                    # *** CRITICAL FIX: Quaternion Ambiguity (q vs -q) Alignment ***
                     dot = torch.sum(preds * targets, dim=1, keepdim=True)
                     preds = torch.where(dot < 0, -preds, preds)
-                    # ************************************************************
                     
                     vloss += criterion(preds, targets).item()
         
