@@ -1,25 +1,34 @@
-name: ML CI
+name: Sanity Check ONNX Model
 
+# Trigger on any push or pull request to main
 on:
   push:
-    branches: [main]
+    branches: [ main ]
   pull_request:
+    branches: [ main ]
 
 jobs:
-  sanity:
+  sanity_check:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
+      # 1️⃣ Checkout the repo
+      - name: Checkout repo
+        uses: actions/checkout@v3
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      # 2️⃣ Setup Python
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v4
         with:
-          python-version: "3.10"
+          python-version: "3.11"
 
-      - name: Install deps
+      # 3️⃣ Install dependencies
+      - name: Install dependencies
         run: |
-          pip install -r requirements.txt
-          pip install onnxruntime numpy
+          python -m pip install --upgrade pip
+          pip install torch torchvision onnxruntime numpy pandas pillow
 
-      - name: Run sanity checks
-        run: python scripts/sanity_check.py
+      # 4️⃣ Run sanity check
+      - name: Run sanity check
+        run: |
+          python scripts/sanity_check.py
